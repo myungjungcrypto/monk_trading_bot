@@ -1,0 +1,26 @@
+# Backend dependencies
+fastapi>=0.104.0
+uvicorn>=0.24.0
+pydantic>=2.5.0
+python-dotenv>=1.0.0
+
+# Database
+sqlalchemy>=2.0.0
+asyncpg>=0.29.0
+alembic>=1.13.0
+
+# HTTP / Async
+aiohttp>=3.9.0
+requests>=2.31.0
+
+# Crypto (Ed25519 signing for Backpack)
+cryptography>=41.0.0
+
+# Auth
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+
+# Data / Strategy
+numpy>=1.26.0
+pandas>=2.1.0
+scipy>=1.11.0
