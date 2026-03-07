@@ -340,18 +340,21 @@ class BackpackExchange(BaseExchange):
             data = [data]
         result = []
         for item in data:
-            size = float(item.get("netSize", 0))
+            size = float(item.get("netQuantity", 0))
             if size == 0:
                 continue
+            # IMF(Initial Margin Fraction)에서 레버리지 역산: leverage = 1 / imf
+            imf = float(item.get("imf", 0))
+            leverage = round(1 / imf) if imf > 0 else 1
             result.append(Position(
                 symbol=item.get("symbol", ""),
                 side=PositionSide.LONG if size > 0 else PositionSide.SHORT,
                 size=abs(size),
                 entry_price=float(item.get("entryPrice", 0)),
                 mark_price=float(item.get("markPrice", 0)),
-                unrealized_pnl=float(item.get("unrealizedPnl", 0)),
-                leverage=float(item.get("leverage", 1)),
-                liquidation_price=_safe_float(item.get("liquidationPrice")),
+                unrealized_pnl=float(item.get("pnlUnrealized", 0)),
+                leverage=leverage,
+                liquidation_price=_safe_float(item.get("estLiquidationPrice")),
                 raw=item,
             ))
         return result
