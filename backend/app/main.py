@@ -46,7 +46,7 @@ from backend.app.models import (
 )
 from backend.app.ws_broadcast import broadcaster
 
-load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,10 @@ _bot_task: Optional[asyncio.Task] = None
 async def lifespan(app: FastAPI):
     """앱 시작/종료 시 DB 초기화 및 봇 관리."""
     # DB 초기화
-    session_factory, engine = create_async_session_factory()
+    from backend.app.models import get_database_url
+    db_url = get_database_url(async_mode=True)
+    logger.info("Using database: %s", db_url.split("@")[-1] if "@" in db_url else db_url)
+    session_factory, engine = create_async_session_factory(db_url)
     set_session_factory(session_factory)
     await init_db(engine)
 
