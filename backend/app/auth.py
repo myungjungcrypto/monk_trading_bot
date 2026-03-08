@@ -10,10 +10,10 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from pydantic import BaseModel
 
 # ── 설정 ─────────────────────────────────────────────────
@@ -24,13 +24,11 @@ ACCESS_TOKEN_EXPIRE_HOURS = 24
 
 # ── 비밀번호 해싱 ────────────────────────────────────────
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
 
 # ── JWT 토큰 ─────────────────────────────────────────────
 
