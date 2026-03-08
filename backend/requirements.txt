@@ -19,6 +19,7 @@ cryptography>=41.0.0
 # Auth
 python-jose[cryptography]>=3.3.0
 passlib[bcrypt]>=1.7.4
+python-multipart>=0.0.6
 
 # Data / Strategy
 numpy>=1.26.0
