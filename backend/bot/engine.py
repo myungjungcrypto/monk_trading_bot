@@ -1,239 +1,254 @@
 """
-Bot Engine — BTC/ETH 페어 트레이딩 메인 루프.
+Bot Engine — BTC/ETH 페어 트레이딩 메인 이벤트 루프.
 
-1분 주기로 가격 데이터를 수집하고, 시그널을 계산하며,
-진입/청산/리스크 관리를 수행합니다.
+v2: REST 폴링 제거 → WebSocket 이벤트 드리븐 구조.
+    PriceHub에서 틱 수신 → MultiTF 시그널 평가 → 진입/청산 실행.
 """
 
 import asyncio
 import logging
 import os
 import time
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
 
 from backend.bot.exchanges.backpack import BackpackExchange
 from backend.bot.exchanges.base import BaseExchange
 from backend.bot.position_manager import PairDirection, PositionManager
+from backend.bot.price_buffer import PriceBuffer
+from backend.bot.price_hub import PriceHub
 from backend.bot.risk_manager import (
     ExitReason,
     RiskAction,
     RiskConfig,
     RiskManager,
 )
-from backend.bot.signal import SignalConfig, SignalDirection, SignalEngine
+from backend.bot.signal import (
+    MultiTFConfig,
+    MultiTimeframeSignalEngine,
+    Signal,
+    SignalDirection,
+    TradingMode,
+    # v1 호환
+    SignalConfig,
+    SignalEngine,
+)
 
 logger = logging.getLogger(__name__)
 
 
+@dataclass
 class BotConfig:
     """봇 전체 설정."""
+    # 거래소 설정
+    position_size_usd: float = 500.0
+    leverage: int = 3
+    paper_trading: bool = False
 
-    def __init__(
-        self,
-        # 거래소 설정
-        position_size_usd: float = 500.0,
-        leverage: int = 3,
-        # 봇 동작
-        loop_interval_sec: int = 60,
-        paper_trading: bool = False,
-        # 시그널 설정
-        signal_config: Optional[SignalConfig] = None,
-        # 리스크 설정
-        risk_config: Optional[RiskConfig] = None,
-    ):
-        self.position_size_usd = position_size_usd
-        self.leverage = leverage
-        self.loop_interval_sec = loop_interval_sec
-        self.paper_trading = paper_trading
-        self.signal_config = signal_config or SignalConfig()
-        self.risk_config = risk_config or RiskConfig()
+    # 운영 모드
+    trading_mode: str = "swing"
+
+    # 시그널 설정 (v2: MultiTF)
+    signal_config: Optional[MultiTFConfig] = None
+    # 시그널 설정 (v1: 단일 Z-score, 하위 호환)
+    legacy_signal_config: Optional[SignalConfig] = None
+
+    # 리스크 설정
+    risk_config: Optional[RiskConfig] = None
+
+    # 포지션 모니터링 간격 (초)
+    position_check_interval: int = 10
 
 
 class BotEngine:
     """
-    페어 트레이딩 봇 메인 엔진.
+    페어 트레이딩 봇 메인 엔진 (v2 — 이벤트 드리븐).
 
-    메인 루프:
-    1. 가격 데이터 수집 (1분 캔들)
-    2. 수익률 계산
-    3. Z-score 시그널 판단
-    4. 진입 조건 → 페어 오픈
-    5. 청산 조건 → 페어 클로즈
-    6. 리스크 관리 (Averaging / Size Reduction)
+    구조:
+    - PriceHub가 모든 거래소 WS에 연결 → 틱 수신
+    - 틱 수신 시 on_tick 콜백에서 시그널 평가
+    - 시그널 발생 시 즉시 진입/청산 실행
+    - 별도 태스크로 포지션 PNL 모니터링
     """
 
-    def __init__(self, exchange: BaseExchange, config: Optional[BotConfig] = None):
-        self.exchange = exchange
+    def __init__(
+        self,
+        exchanges: Dict[str, BaseExchange],
+        config: Optional[BotConfig] = None,
+    ):
+        self.exchanges = exchanges
         self.config = config or BotConfig()
-        self.signal_engine = SignalEngine(self.config.signal_config)
-        self.position_manager = PositionManager()
-        self.risk_manager = RiskManager(self.config.risk_config)
 
-        self._running = False
-        self._btc_prices: list[float] = []
-        self._eth_prices: list[float] = []
+        # 데이터 엔진
+        self.price_buffer = PriceBuffer()
+        self.price_hub = PriceHub(exchanges, self.price_buffer)
+
+        # 시그널 엔진 (v2)
+        signal_cfg = self.config.signal_config or MultiTFConfig.from_mode(self.config.trading_mode)
+        self.signal_engine = MultiTimeframeSignalEngine(signal_cfg)
+
+        # 거래 엔진
+        self.position_manager = PositionManager()
+        self.risk_manager = RiskManager(self.config.risk_config or RiskConfig())
 
         # 상태
+        self._running = False
+        self._tick_count = 0
+        self._signal_count = 0
         self._last_tick_time: float = 0
-        self._tick_count: int = 0
         self._errors: list[str] = []
+
+        # 첫 번째 활성 거래소 (주문 실행용)
+        self._primary_exchange: Optional[BaseExchange] = None
 
     @property
     def is_running(self) -> bool:
         return self._running
 
-    # ── 메인 루프 ─────────────────────────────────────────────
+    # ── 메인 실행 ───────────────────────────────────────────
 
     async def start(self) -> None:
-        """봇 메인 루프를 시작합니다."""
-        logger.info("Bot engine starting... exchange=%s", self.exchange.name)
-        logger.info(
-            "Config: size=$%.0f, leverage=%dx, interval=%ds, paper=%s",
-            self.config.position_size_usd,
-            self.config.leverage,
-            self.config.loop_interval_sec,
-            self.config.paper_trading,
-        )
-
+        """봇을 시작합니다. PriceHub + 포지션 모니터링을 비동기 병렬 실행."""
         self._running = True
 
-        # 초기 가격 히스토리 로드
-        await self._load_initial_prices()
+        logger.info("Bot engine starting... mode=%s exchanges=%s",
+                     self.config.trading_mode, list(self.exchanges.keys()))
+        logger.info("Config: size=$%.0f, leverage=%dx, paper=%s",
+                     self.config.position_size_usd, self.config.leverage, self.config.paper_trading)
 
-        while self._running:
-            try:
-                await self._tick()
-            except Exception as e:
-                error_msg = f"Tick error: {e}"
-                logger.error(error_msg, exc_info=True)
-                self._errors.append(error_msg)
-                if len(self._errors) > 100:
-                    self._errors = self._errors[-50:]
+        # 첫 번째 활성 거래소를 기본 주문 실행 거래소로 설정
+        self._primary_exchange = next(iter(self.exchanges.values()), None)
 
-            await asyncio.sleep(self.config.loop_interval_sec)
+        # 틱 이벤트 리스너 등록
+        self.price_hub.add_listener(self._on_tick)
 
-        logger.info("Bot engine stopped.")
+        # 병렬 태스크 실행
+        try:
+            await asyncio.gather(
+                self.price_hub.start(),                    # WS 연결 유지
+                self._position_monitor_loop(),             # 포지션 PNL 감시
+                self._status_log_loop(),                   # 주기적 상태 로그
+            )
+        except asyncio.CancelledError:
+            logger.info("Bot engine tasks cancelled")
+        finally:
+            await self.stop()
 
     async def stop(self) -> None:
         """봇을 정지합니다."""
-        logger.info("Stopping bot engine...")
+        if not self._running:
+            return
         self._running = False
+        logger.info("Stopping bot engine...")
+        await self.price_hub.stop()
 
-    # ── 단일 틱 ───────────────────────────────────────────────
+        # 거래소 세션 정리
+        for exchange in self.exchanges.values():
+            if hasattr(exchange, 'close'):
+                await exchange.close()
 
-    async def _tick(self) -> None:
-        """1회 주기 실행."""
+        logger.info("Bot engine stopped.")
+
+    # ── 틱 이벤트 핸들러 ─────────────────────────────────────
+
+    async def _on_tick(
+        self,
+        exchange: str,
+        symbol: str,
+        price: float,
+        timestamp_ms: int,
+    ) -> None:
+        """
+        PriceHub에서 틱 수신 시 호출됩니다.
+
+        1. 시그널 엔진 평가
+        2. 진입/청산 결정
+        """
         self._tick_count += 1
         self._last_tick_time = time.time()
 
-        # 1. 가격 수집
-        btc_price, eth_price = await self._fetch_prices()
-        if btc_price is None or eth_price is None:
-            return
-
-        self._btc_prices.append(btc_price)
-        self._eth_prices.append(eth_price)
-
-        # 메모리 관리: 최대 500개 유지
-        if len(self._btc_prices) > 500:
-            self._btc_prices = self._btc_prices[-300:]
-            self._eth_prices = self._eth_prices[-300:]
-
-        lookback = self.config.signal_config.lookback_minutes
-
-        # 2. 수익률 계산
-        btc_ret = SignalEngine.calculate_return(self._btc_prices, lookback)
-        eth_ret = SignalEngine.calculate_return(self._eth_prices, lookback)
-
-        # 3. 시그널 판단
-        signal = self.signal_engine.check_entry(btc_ret, eth_ret)
-
-        logger.info(
-            "Tick #%d | BTC=$%.2f ETH=$%.2f | spread=%.2f%% Z=%.2f prob=%.1f%% | data=%d/%d",
-            self._tick_count, btc_price, eth_price,
-            signal.spread_pct, signal.zscore, signal.probability_pct,
-            self.signal_engine.spread_history_len, self.signal_engine.window,
-        )
-
-        # 4. 포지션이 없으면 → 진입 체크
-        if not self.position_manager.has_open_position:
-            if signal.should_enter and self.risk_manager.can_open_trade(0):
-                await self._handle_entry(signal)
-            return
-
-        # 5. 포지션이 있으면 → 업데이트 & 청산/리스크 체크
-        await self.position_manager.update_positions(self.exchange)
-
-        for trade_id, trade in list(self.position_manager.open_trades.items()):
-            decision = self.risk_manager.evaluate(
-                trade,
-                zscore_reverted=signal.should_exit_zscore,
-            )
-
-            if decision.action == RiskAction.EXIT:
-                await self._handle_exit(trade_id, decision.reason, decision.message)
-            elif decision.action == RiskAction.AVERAGING_DOWN:
-                await self._handle_averaging(trade_id, decision.message)
-            elif decision.action == RiskAction.SIZE_REDUCTION:
-                await self._handle_size_reduction(trade_id, decision.message)
-
-    # ── 가격 수집 ─────────────────────────────────────────────
-
-    async def _fetch_prices(self) -> tuple[Optional[float], Optional[float]]:
-        """BTC, ETH 현재가를 조회합니다."""
         try:
-            btc_symbol = self.exchange.perp_symbol("BTC")
-            eth_symbol = self.exchange.perp_symbol("ETH")
+            # 시그널 평가
+            signal = self.signal_engine.evaluate(self.price_buffer)
 
-            tickers = await self.exchange.get_tickers([btc_symbol, eth_symbol])
-            btc_ticker = tickers.get(btc_symbol)
-            eth_ticker = tickers.get(eth_symbol)
+            # 포지션 없으면 → 진입 체크
+            if not self.position_manager.has_open_position:
+                if signal.should_enter and self.risk_manager.can_open_trade(0):
+                    await self._handle_entry(signal)
+            else:
+                # 포지션 있으면 → Z-score 수렴 청산 체크
+                if signal.should_exit_zscore:
+                    for trade_id, trade in list(self.position_manager.open_trades.items()):
+                        if trade.net_pnl_usd > 0:  # 수익 중일 때만 Z-score 수렴 청산
+                            await self._handle_exit(trade_id, ExitReason.ZSCORE,
+                                                     f"Z-score reverted (z={signal.zscore_current:.2f})")
 
-            if btc_ticker is None or eth_ticker is None:
-                logger.warning("Missing ticker data: BTC=%s ETH=%s (keys: %s)", btc_ticker, eth_ticker, list(tickers.keys()))
-                return None, None
-
-            return btc_ticker.last_price, eth_ticker.last_price
         except Exception as e:
-            logger.error("Price fetch failed: %s", e)
-            return None, None
+            error_msg = f"Tick handler error: {e}"
+            logger.error(error_msg, exc_info=True)
+            self._errors.append(error_msg)
+            if len(self._errors) > 100:
+                self._errors = self._errors[-50:]
 
-    async def _load_initial_prices(self) -> None:
-        """초기 가격 히스토리를 K-line에서 로드합니다."""
-        try:
-            btc_symbol = self.exchange.perp_symbol("BTC")
-            eth_symbol = self.exchange.perp_symbol("ETH")
+    # ── 포지션 모니터링 루프 ──────────────────────────────────
 
-            # lookback + sigma_window 만큼의 히스토리 필요
-            need = self.config.signal_config.sigma_window + self.config.signal_config.lookback_minutes + 10
-            limit = min(need, 200)
+    async def _position_monitor_loop(self) -> None:
+        """포지션 PNL을 주기적으로 체크하여 TP/SL/Trailing/Timeout 처리."""
+        while self._running:
+            try:
+                if self.position_manager.has_open_position and self._primary_exchange:
+                    await self.position_manager.update_positions(self._primary_exchange)
 
-            btc_klines = await self.exchange.get_klines(btc_symbol, "1m", limit)
-            eth_klines = await self.exchange.get_klines(eth_symbol, "1m", limit)
+                    for trade_id, trade in list(self.position_manager.open_trades.items()):
+                        signal = self.signal_engine.evaluate(self.price_buffer)
+                        decision = self.risk_manager.evaluate(
+                            trade,
+                            zscore_reverted=signal.should_exit_zscore,
+                        )
 
-            self._btc_prices = [k["close"] for k in btc_klines]
-            self._eth_prices = [k["close"] for k in eth_klines]
+                        if decision.action == RiskAction.EXIT:
+                            await self._handle_exit(trade_id, decision.reason, decision.message)
+                        elif decision.action == RiskAction.AVERAGING_DOWN:
+                            await self._handle_averaging(trade_id, decision.message)
+                        elif decision.action == RiskAction.SIZE_REDUCTION:
+                            await self._handle_size_reduction(trade_id, decision.message)
 
-            # 시그널 엔진에 히스토리 채우기
-            lookback = self.config.signal_config.lookback_minutes
-            for i in range(lookback, len(self._btc_prices)):
-                btc_ret = SignalEngine.calculate_return(self._btc_prices[:i + 1], lookback)
-                eth_ret = SignalEngine.calculate_return(self._eth_prices[:i + 1], lookback)
-                spread = SignalEngine.calculate_spread(btc_ret, eth_ret)
-                self.signal_engine.add_spread(spread)
+            except Exception as e:
+                logger.error("Position monitor error: %s", e)
+
+            await asyncio.sleep(self.config.position_check_interval)
+
+    # ── 주기적 상태 로그 ─────────────────────────────────────
+
+    async def _status_log_loop(self) -> None:
+        """60초마다 상태를 로깅합니다."""
+        while self._running:
+            await asyncio.sleep(60)
+
+            if not self.price_buffer.has_data:
+                logger.info("Waiting for price data... ticks=%d", self._tick_count)
+                continue
+
+            status = self.signal_engine.get_status()
+            btc_price = self.price_buffer.btc.last_price or 0
+            eth_price = self.price_buffer.eth.last_price or 0
+            positions = len(self.position_manager.open_trades)
 
             logger.info(
-                "Initial prices loaded: BTC=%d candles, ETH=%d candles, spreads=%d",
-                len(self._btc_prices), len(self._eth_prices),
-                self.signal_engine.spread_history_len,
+                "Status | BTC=$%.2f ETH=$%.2f | mode=%s Z=%.2f trend=%s | "
+                "ticks=%d signals=%d positions=%d | data=%d/%d",
+                btc_price, eth_price,
+                status["mode"], status["zscore_5m"], status["trend_1h"],
+                self._tick_count, self._signal_count, positions,
+                status["spread_5m_history_len"], status["window"],
             )
-        except Exception as e:
-            logger.warning("Failed to load initial prices (will warm up): %s", e)
 
-    # ── 진입 처리 ─────────────────────────────────────────────
+    # ── 진입 처리 ───────────────────────────────────────────
 
-    async def _handle_entry(self, signal) -> None:
+    async def _handle_entry(self, signal: Signal) -> None:
         """시그널에 따라 페어 포지션을 엽니다."""
+        self._signal_count += 1
+
         direction = (
             PairDirection.LONG_BTC_SHORT_ETH
             if signal.direction == SignalDirection.LONG_BTC_SHORT_ETH
@@ -241,21 +256,27 @@ class BotEngine:
         )
 
         logger.info(
-            "ENTRY SIGNAL: %s | Z=%.2f spread=%.2f%% prob=%.1f%%",
-            direction.value, signal.zscore, signal.spread_pct, signal.probability_pct,
+            "ENTRY SIGNAL #%d: %s | Z5m=%.2f div=%.2f%% prob=%.1f%% trend=%s",
+            self._signal_count, direction.value,
+            signal.zscore_5m, signal.divergence_pct,
+            signal.probability_pct, signal.trend.value,
         )
 
         if self.config.paper_trading:
             logger.info("[PAPER] Would open pair: %s $%.0f", direction.value, self.config.position_size_usd)
             return
 
+        if self._primary_exchange is None:
+            logger.error("No exchange available for order execution")
+            return
+
         trade = await self.position_manager.open_pair(
-            exchange=self.exchange,
+            exchange=self._primary_exchange,
             direction=direction,
             size_usd=self.config.position_size_usd,
             leverage=self.config.leverage,
-            zscore=signal.zscore,
-            spread_pct=signal.spread_pct,
+            zscore=signal.zscore_5m,
+            spread_pct=signal.divergence_pct,
         )
 
         if trade:
@@ -263,7 +284,7 @@ class BotEngine:
         else:
             logger.error("Failed to open pair trade")
 
-    # ── 청산 처리 ─────────────────────────────────────────────
+    # ── 청산 처리 ───────────────────────────────────────────
 
     async def _handle_exit(self, trade_id: str, reason: ExitReason, message: str) -> None:
         """포지션을 청산합니다."""
@@ -275,7 +296,10 @@ class BotEngine:
                 logger.info("[PAPER] Would close pair: PNL=$%.2f (%.2f%%)", trade.net_pnl_usd, trade.pnl_pct)
             return
 
-        trade = await self.position_manager.close_pair(trade_id, self.exchange, reason.value)
+        if self._primary_exchange is None:
+            return
+
+        trade = await self.position_manager.close_pair(trade_id, self._primary_exchange, reason.value)
         if trade:
             self.risk_manager.on_trade_closed(trade_id, trade.net_pnl_usd)
             logger.info(
@@ -283,50 +307,51 @@ class BotEngine:
                 trade_id, trade.net_pnl_usd, trade.pnl_pct, reason.value,
             )
 
-    # ── 리스크 액션 처리 ──────────────────────────────────────
+    # ── 리스크 액션 처리 ─────────────────────────────────────
 
     async def _handle_averaging(self, trade_id: str, message: str) -> None:
-        """Averaging down을 실행합니다."""
         logger.info("AVERAGING: %s | %s", trade_id, message)
-
         if self.config.paper_trading:
             logger.info("[PAPER] Would average down: %s", trade_id)
             return
-
+        if self._primary_exchange is None:
+            return
         success = await self.position_manager.averaging_down(
-            trade_id, self.exchange, self.config.risk_config.averaging_multiplier,
+            trade_id, self._primary_exchange, self.config.risk_config.averaging_multiplier
+            if self.config.risk_config else 0.5,
         )
         if success:
             logger.info("Averaging completed: %s", trade_id)
 
     async def _handle_size_reduction(self, trade_id: str, message: str) -> None:
-        """Size reduction을 실행합니다."""
         logger.info("SIZE REDUCTION: %s | %s", trade_id, message)
-
         if self.config.paper_trading:
             logger.info("[PAPER] Would reduce size: %s", trade_id)
             return
-
+        if self._primary_exchange is None:
+            return
         success = await self.position_manager.size_reduction(
-            trade_id, self.exchange, self.config.risk_config.size_reduction_ratio,
+            trade_id, self._primary_exchange, self.config.risk_config.size_reduction_ratio
+            if self.config.risk_config else 0.5,
         )
         if success:
             logger.info("Size reduction completed: %s", trade_id)
 
-    # ── 상태 조회 (대시보드용) ────────────────────────────────
+    # ── 상태 조회 (대시보드용) ───────────────────────────────
 
     def get_status(self) -> dict:
-        """봇 전체 상태 요약."""
         return {
             "running": self._running,
-            "exchange": self.exchange.name,
+            "mode": self.config.trading_mode,
+            "exchanges": list(self.exchanges.keys()),
             "tick_count": self._tick_count,
+            "signal_count": self._signal_count,
             "last_tick": self._last_tick_time,
             "paper_trading": self.config.paper_trading,
             "signal": self.signal_engine.get_status(),
             "positions": self.position_manager.get_summary(),
             "risk": self.risk_manager.get_status(),
-            "price_history_len": len(self._btc_prices),
+            "price_hub": self.price_hub.get_status(),
             "recent_errors": self._errors[-5:],
         }
 
@@ -339,37 +364,58 @@ async def run_bot():
     from dotenv import load_dotenv
     load_dotenv()
 
-    # 로깅 설정
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    api_key = os.getenv("BACKPACK_API_KEY")
-    secret_key = os.getenv("BACKPACK_SECRET_KEY")
+    # 거래소 초기화
+    exchanges: Dict[str, BaseExchange] = {}
 
-    if not api_key or not secret_key:
-        logger.error("BACKPACK_API_KEY and BACKPACK_SECRET_KEY must be set in .env")
+    # Backpack
+    bp_key = os.getenv("BACKPACK_API_KEY")
+    bp_secret = os.getenv("BACKPACK_SECRET_KEY")
+    if bp_key and bp_secret:
+        exchanges["backpack"] = BackpackExchange(api_key=bp_key, secret_key=bp_secret)
+        logger.info("Backpack exchange initialized")
+
+    # Pacifica (API 문서 확인 후 활성화)
+    pac_key = os.getenv("PACIFICA_API_KEY")
+    pac_secret = os.getenv("PACIFICA_SECRET_KEY")
+    if pac_key and pac_secret:
+        from backend.bot.exchanges.pacifica import PacificaExchange
+        exchanges["pacifica"] = PacificaExchange(api_key=pac_key, secret_key=pac_secret)
+        logger.info("Pacifica exchange initialized")
+
+    # Extended (API 문서 확인 후 활성화)
+    ext_key = os.getenv("EXTENDED_API_KEY")
+    ext_secret = os.getenv("EXTENDED_SECRET_KEY")
+    if ext_key and ext_secret:
+        from backend.bot.exchanges.extended import ExtendedExchange
+        exchanges["extended"] = ExtendedExchange(api_key=ext_key, secret_key=ext_secret)
+        logger.info("Extended exchange initialized")
+
+    # Lighter (API 문서 확인 후 활성화)
+    lt_key = os.getenv("LIGHTER_API_KEY")
+    lt_secret = os.getenv("LIGHTER_SECRET_KEY")
+    if lt_key and lt_secret:
+        from backend.bot.exchanges.lighter import LighterExchange
+        exchanges["lighter"] = LighterExchange(api_key=lt_key, secret_key=lt_secret)
+        logger.info("Lighter exchange initialized")
+
+    if not exchanges:
+        logger.error("No exchanges configured. Set API keys in .env")
         return
 
-    exchange = BackpackExchange(api_key=api_key, secret_key=secret_key)
-
-    # 설정 (환경변수 또는 기본값)
+    # 설정
+    trading_mode = os.getenv("TRADING_MODE", "swing")
     config = BotConfig(
         position_size_usd=float(os.getenv("POSITION_SIZE_USD", "500")),
         leverage=int(os.getenv("LEVERAGE", "3")),
-        loop_interval_sec=int(os.getenv("LOOP_INTERVAL_SEC", "60")),
         paper_trading=os.getenv("PAPER_TRADING", "true").lower() == "true",
-        signal_config=SignalConfig(
-            divergence_threshold_pct=float(os.getenv("DIVERGENCE_THRESHOLD", "2.5")),
-            lookback_minutes=int(os.getenv("LOOKBACK_MINUTES", "15")),
-            confirmation_candles=int(os.getenv("CONFIRMATION_CANDLES", "2")),
-            sigma_window=int(os.getenv("SIGMA_WINDOW", "100")),
-            entry_zscore=float(os.getenv("ENTRY_ZSCORE", "2.0")),
-            max_zscore=float(os.getenv("MAX_ZSCORE", "3.5")),
-            probability_threshold_pct=float(os.getenv("PROBABILITY_THRESHOLD", "95")),
-        ),
+        trading_mode=trading_mode,
+        signal_config=MultiTFConfig.from_mode(trading_mode),
         risk_config=RiskConfig(
             take_profit_pct=float(os.getenv("TAKE_PROFIT_PCT", "0.8")),
             stop_loss_pct=float(os.getenv("STOP_LOSS_PCT", "-3.0")),
@@ -379,7 +425,7 @@ async def run_bot():
         ),
     )
 
-    bot = BotEngine(exchange=exchange, config=config)
+    bot = BotEngine(exchanges=exchanges, config=config)
 
     try:
         await bot.start()
@@ -387,7 +433,6 @@ async def run_bot():
         logger.info("Keyboard interrupt received")
     finally:
         await bot.stop()
-        await exchange.close()
 
 
 if __name__ == "__main__":

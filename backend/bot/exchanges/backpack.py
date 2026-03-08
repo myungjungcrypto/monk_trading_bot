@@ -23,6 +23,7 @@ from backend.bot.exchanges.base import (
     OrderType,
     Position,
     PositionSide,
+    TickCallback,
     Ticker,
 )
 
@@ -56,6 +57,7 @@ class BackpackExchange(BaseExchange):
 
     name = "backpack"
     BASE_URL = "https://api.backpack.exchange/"
+    WS_URL = "wss://ws.backpack.exchange"
     REQUEST_WINDOW = 5000  # ms
 
     def __init__(
@@ -64,6 +66,7 @@ class BackpackExchange(BaseExchange):
         secret_key: str,
         request_window: int = 5000,
         base_url: Optional[str] = None,
+        ws_url: Optional[str] = None,
     ):
         """
         Args:
@@ -71,6 +74,7 @@ class BackpackExchange(BaseExchange):
             secret_key: Base64 인코딩된 private key (Ed25519 서명에 사용)
             request_window: 요청 유효 시간 (ms), 기본 5000
             base_url: API base URL 오버라이드 (테스트용)
+            ws_url: WebSocket URL 오버라이드 (테스트용)
         """
         self.api_key = api_key
         self.private_key = Ed25519PrivateKey.from_private_bytes(
@@ -78,7 +82,11 @@ class BackpackExchange(BaseExchange):
         )
         self.request_window = request_window
         self.base_url = (base_url or self.BASE_URL).rstrip("/")
+        self.ws_url = ws_url or self.WS_URL
         self._session: Optional[aiohttp.ClientSession] = None
+        self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
+        self._ws_running: bool = False
+        self._ws_task: Optional[Any] = None
 
     # ── HTTP 세션 관리 ──────────────────────────────────────
 
@@ -410,6 +418,88 @@ class BackpackExchange(BaseExchange):
             if b.asset == asset:
                 return b
         return None
+
+    # ── WebSocket ─────────────────────────────────────────
+
+    async def connect_ws(
+        self,
+        symbols: List[str],
+        on_tick: "TickCallback",
+    ) -> None:
+        """Backpack WebSocket에 연결하여 실시간 틱을 수신합니다."""
+        import asyncio
+
+        self._ws_running = True
+
+        async def _run():
+            while self._ws_running:
+                try:
+                    session = await self._get_session()
+                    self._ws = await session.ws_connect(self.ws_url)
+                    logger.info("Backpack WS connected")
+
+                    # 각 심볼의 ticker 스트림 구독
+                    for sym in symbols:
+                        subscribe_msg = {
+                            "method": "SUBSCRIBE",
+                            "params": [f"ticker.{sym}"],
+                        }
+                        await self._ws.send_json(subscribe_msg)
+                        logger.info("Backpack WS subscribed: ticker.%s", sym)
+
+                    async for msg in self._ws:
+                        if not self._ws_running:
+                            break
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            try:
+                                data = json.loads(msg.data)
+                                await self._handle_ws_message(data, on_tick)
+                            except Exception as e:
+                                logger.warning("Backpack WS message parse error: %s", e)
+                        elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                            logger.warning("Backpack WS closed/error: %s", msg.type)
+                            break
+
+                except Exception as e:
+                    if self._ws_running:
+                        logger.error("Backpack WS error: %s, reconnecting in 3s...", e)
+                        await asyncio.sleep(3)
+
+            logger.info("Backpack WS loop ended")
+
+        self._ws_task = asyncio.create_task(_run())
+
+    async def _handle_ws_message(
+        self, data: dict, on_tick: "TickCallback"
+    ) -> None:
+        """WebSocket 메시지를 파싱하여 on_tick 콜백을 호출합니다."""
+        stream = data.get("stream", "")
+        if not stream.startswith("ticker."):
+            return
+
+        payload = data.get("data", {})
+        symbol = payload.get("s", stream.replace("ticker.", ""))
+        last_price_str = payload.get("c") or payload.get("lastPrice")
+        if last_price_str is None:
+            return
+
+        price = float(last_price_str)
+        ts = int(payload.get("E", payload.get("t", time.time() * 1000)))
+        await on_tick(self.name, symbol, price, ts)
+
+    async def disconnect_ws(self) -> None:
+        """WebSocket 연결을 종료합니다."""
+        self._ws_running = False
+        if self._ws and not self._ws.closed:
+            await self._ws.close()
+        if self._ws_task:
+            self._ws_task.cancel()
+            self._ws_task = None
+        logger.info("Backpack WS disconnected")
+
+    @property
+    def ws_connected(self) -> bool:
+        return self._ws is not None and not self._ws.closed
 
     # ── 유틸리티 ────────────────────────────────────────────
 

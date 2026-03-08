@@ -3,12 +3,17 @@
 
 모든 거래소 커넥터(Backpack, Pacifica, Extended, Lighter)는
 이 클래스를 상속받아 구현해야 합니다.
+
+v2: WebSocket 실시간 스트림 지원 추가.
 """
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Coroutine, Dict, List, Optional
+
+# WebSocket 틱 콜백 타입: async def callback(exchange, symbol, price, timestamp)
+TickCallback = Callable[[str, str, float, int], Coroutine[Any, Any, None]]
 
 
 class OrderSide(str, Enum):
@@ -185,6 +190,30 @@ class BaseExchange(ABC):
     @abstractmethod
     async def get_balance(self, asset: str) -> Optional[Balance]:
         """특정 자산의 잔고를 조회합니다."""
+
+    # ── WebSocket ──────────────────────────────────────────
+
+    @abstractmethod
+    async def connect_ws(
+        self,
+        symbols: List[str],
+        on_tick: TickCallback,
+    ) -> None:
+        """
+        WebSocket에 연결하여 실시간 틱을 수신합니다.
+
+        연결이 끊어지면 자동으로 재연결해야 합니다.
+        틱이 수신되면 on_tick(exchange_name, symbol, price, timestamp_ms)을 호출합니다.
+        """
+
+    @abstractmethod
+    async def disconnect_ws(self) -> None:
+        """WebSocket 연결을 종료합니다."""
+
+    @property
+    def ws_connected(self) -> bool:
+        """WebSocket 연결 상태를 반환합니다. 하위 클래스에서 오버라이드."""
+        return False
 
     # ── 유틸리티 ────────────────────────────────────────────
 
