@@ -148,10 +148,11 @@ class BotEngine:
         # 3. 시그널 판단
         signal = self.signal_engine.check_entry(btc_ret, eth_ret)
 
-        logger.debug(
-            "Tick #%d | BTC=$%.2f ETH=$%.2f | spread=%.2f%% Z=%.2f prob=%.1f%%",
+        logger.info(
+            "Tick #%d | BTC=$%.2f ETH=$%.2f | spread=%.2f%% Z=%.2f prob=%.1f%% | data=%d/%d",
             self._tick_count, btc_price, eth_price,
             signal.spread_pct, signal.zscore, signal.probability_pct,
+            self.signal_engine.spread_history_len, self.signal_engine.window,
         )
 
         # 4. 포지션이 없으면 → 진입 체크
@@ -189,7 +190,7 @@ class BotEngine:
             eth_ticker = tickers.get(eth_symbol)
 
             if btc_ticker is None or eth_ticker is None:
-                logger.warning("Missing ticker data")
+                logger.warning("Missing ticker data: BTC=%s ETH=%s (keys: %s)", btc_ticker, eth_ticker, list(tickers.keys()))
                 return None, None
 
             return btc_ticker.last_price, eth_ticker.last_price
