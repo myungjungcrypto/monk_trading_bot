@@ -117,17 +117,32 @@ class User(Base):
 # ── DB 연결 ──────────────────────────────────────────────
 
 def get_database_url(async_mode: bool = True) -> str:
-    """환경변수에서 DB URL을 생성합니다."""
+    """환경변수에서 DB URL을 생성합니다. DB_URL이 없으면 SQLite 폴백."""
     import os
-    host = os.getenv("DB_HOST", "localhost")
-    port = os.getenv("DB_PORT", "5432")
-    name = os.getenv("DB_NAME", "monk_bot")
-    user = os.getenv("DB_USER", "monk")
-    password = os.getenv("DB_PASSWORD", "monk")
 
+    # 명시적 DB_URL 환경변수 우선
+    explicit_url = os.getenv("DATABASE_URL")
+    if explicit_url:
+        if async_mode and explicit_url.startswith("postgresql://"):
+            return explicit_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return explicit_url
+
+    # PostgreSQL 설정이 있으면 사용
+    host = os.getenv("DB_HOST")
+    if host:
+        port = os.getenv("DB_PORT", "5432")
+        name = os.getenv("DB_NAME", "monk_bot")
+        user = os.getenv("DB_USER", "monk")
+        password = os.getenv("DB_PASSWORD", "monk")
+        if async_mode:
+            return f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{name}"
+        return f"postgresql://{user}:{password}@{host}:{port}/{name}"
+
+    # 폴백: SQLite (로컬 개발용)
+    db_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "monk_bot.db")
     if async_mode:
-        return f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{name}"
-    return f"postgresql://{user}:{password}@{host}:{port}/{name}"
+        return f"sqlite+aiosqlite:///{db_path}"
+    return f"sqlite:///{db_path}"
 
 
 def create_async_session_factory(database_url: Optional[str] = None):
