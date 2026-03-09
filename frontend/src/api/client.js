@@ -1,9 +1,9 @@
 import axios from "axios";
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_URL || "";
 
 const api = axios.create({
-  baseURL: API_BASE,
+  baseURL: API_BASE || window.location.origin,
 });
 
 // JWT 토큰 자동 첨부
@@ -59,7 +59,8 @@ export const getHealth = () => api.get("/api/health");
 
 // Dashboard WebSocket
 export const createDashboardWs = (onMessage) => {
-  const wsUrl = API_BASE.replace(/^http/, "ws") + "/ws/dashboard";
+  const base = API_BASE || window.location.origin;
+  const wsUrl = base.replace(/^http/, "ws") + "/ws/dashboard";
   const ws = new WebSocket(wsUrl);
   ws.onmessage = (e) => onMessage(JSON.parse(e.data));
   ws.onclose = () => setTimeout(() => createDashboardWs(onMessage), 3000);
