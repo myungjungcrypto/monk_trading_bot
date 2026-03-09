@@ -4,21 +4,21 @@
       "name": "monk-api",
       "script": "uvicorn",
       "args": "app.main:app --host 0.0.0.0 --port 8000",
-      "cwd": "/home/ubuntu/monk_trading_bot/backend",
-      "interpreter": "python3",
+      "cwd": "/home/ec2-user/monk_trading_bot/backend",
+      "interpreter": "/home/ec2-user/monk_trading_bot/venv/bin/python3",
       "env": {
-        "PYTHONPATH": "/home/ubuntu/monk_trading_bot"
+        "PYTHONPATH": "/home/ec2-user/monk_trading_bot"
       },
       "max_restarts": 10,
       "restart_delay": 3000
     },
     {
       "name": "monk-bot",
-      "script": "python3",
+      "script": "/home/ec2-user/monk_trading_bot/venv/bin/python3",
       "args": "-m bot.engine",
-      "cwd": "/home/ubuntu/monk_trading_bot/backend",
+      "cwd": "/home/ec2-user/monk_trading_bot/backend",
       "env": {
-        "PYTHONPATH": "/home/ubuntu/monk_trading_bot"
+        "PYTHONPATH": "/home/ec2-user/monk_trading_bot"
       },
       "max_restarts": 20,
       "restart_delay": 3000
