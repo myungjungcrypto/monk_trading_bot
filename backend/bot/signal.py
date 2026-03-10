@@ -102,6 +102,9 @@ class MultiTFConfig:
     max_zscore: float = 3.5
     divergence_threshold_pct: float = 1.5
 
+    # Layer 2: divergence lookback (5분봉 개수, 기본 12 = 60분)
+    divergence_lookback: int = 12
+
     # Layer 3: 틱 peak 수렴
     peak_revert_ratio: float = 0.90
 
@@ -115,7 +118,8 @@ class MultiTFConfig:
             z_window_5m=30,
             entry_zscore=1.5,
             max_zscore=3.0,
-            divergence_threshold_pct=1.0,
+            divergence_threshold_pct=0.3,
+            divergence_lookback=3,
             peak_revert_ratio=0.95,
             zscore_revert_threshold=0.3,
         )
@@ -222,8 +226,8 @@ class MultiTimeframeSignalEngine:
         signal.zscore_current = z5m
         signal.probability_pct = self._zscore_to_probability(z5m)
 
-        # 현재 divergence (5분봉 최근 12개 = 60분)
-        div5m = self._divergence(price_buffer, lookback=12)
+        # 현재 divergence (5분봉 기준, lookback은 모드별 설정)
+        div5m = self._divergence(price_buffer, lookback=self.config.divergence_lookback)
         signal.divergence_pct = div5m
 
         # Z-score 수렴 청산 체크
