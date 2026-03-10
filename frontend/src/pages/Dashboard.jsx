@@ -62,7 +62,7 @@ export default function Dashboard() {
   const handleStart = async (mode) => {
     setLoading(true);
     try {
-      await startBot(mode, true);
+      await startBot(mode, false);
       const res = await getBotStatus();
       setStatus(res.data);
     } catch (err) {
