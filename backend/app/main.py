@@ -173,13 +173,36 @@ async def bot_start(
 
     # 거래소 초기화
     exchanges = {}
+
+    # Backpack
     bp_key = os.getenv("BACKPACK_API_KEY")
     bp_secret = os.getenv("BACKPACK_SECRET_KEY")
     if bp_key and bp_secret:
         exchanges["backpack"] = BackpackExchange(api_key=bp_key, secret_key=bp_secret)
 
+    # Pacifica
+    pac_key = os.getenv("PACIFICA_API_KEY")
+    pac_secret = os.getenv("PACIFICA_SECRET_KEY")
+    if pac_key and pac_secret:
+        from backend.bot.exchanges.pacifica import PacificaExchange
+        exchanges["pacifica"] = PacificaExchange(api_key=pac_key, secret_key=pac_secret)
+
+    # Extended
+    ext_key = os.getenv("EXTENDED_API_KEY")
+    ext_secret = os.getenv("EXTENDED_SECRET_KEY")
+    if ext_key and ext_secret:
+        from backend.bot.exchanges.extended import ExtendedExchange
+        exchanges["extended"] = ExtendedExchange(api_key=ext_key, secret_key=ext_secret)
+
+    # Lighter
+    lt_key = os.getenv("LIGHTER_API_KEY")
+    lt_secret = os.getenv("LIGHTER_SECRET_KEY")
+    if lt_key and lt_secret:
+        from backend.bot.exchanges.lighter import LighterExchange
+        exchanges["lighter"] = LighterExchange(api_key=lt_key, secret_key=lt_secret)
+
     if not exchanges:
-        raise HTTPException(400, "No exchanges configured")
+        raise HTTPException(400, "No exchanges configured. Set API keys in .env")
 
     config = BotConfig(
         position_size_usd=float(os.getenv("POSITION_SIZE_USD", "500")),
