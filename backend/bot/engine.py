@@ -33,6 +33,7 @@ from backend.bot.signal import (
     SignalConfig,
     SignalEngine,
 )
+from backend.bot.telegram_notifier import TelegramNotifier
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,9 @@ class BotEngine:
         self.position_manager = PositionManager()
         self.risk_manager = RiskManager(self.config.risk_config or RiskConfig())
 
+        # 텔레그램 알림
+        self.telegram = TelegramNotifier.from_env()
+
         # 상태
         self._running = False
         self._tick_count = 0
@@ -122,6 +126,13 @@ class BotEngine:
         # 틱 이벤트 리스너 등록
         self.price_hub.add_listener(self._on_tick)
 
+        # 텔레그램 봇 시작 알림
+        if self.telegram:
+            await self.telegram.notify_bot_started(
+                self.config.trading_mode, list(self.exchanges.keys()),
+                self.config.position_size_usd, self.config.leverage,
+            )
+
         # 병렬 태스크 실행
         try:
             await asyncio.gather(
@@ -141,6 +152,11 @@ class BotEngine:
         self._running = False
         logger.info("Stopping bot engine...")
         await self.price_hub.stop()
+
+        # 텔레그램 봇 정지 알림
+        if self.telegram:
+            await self.telegram.notify_bot_stopped()
+            await self.telegram.close()
 
         # 거래소 세션 정리
         for exchange in self.exchanges.values():
@@ -281,6 +297,17 @@ class BotEngine:
 
         if trade:
             logger.info("Trade opened: %s | PNL tracking started", trade.trade_id)
+            if self.telegram:
+                await self.telegram.notify_entry(
+                    direction=direction.value,
+                    exchange=self._primary_exchange.name if self._primary_exchange else "unknown",
+                    size_usd=self.config.position_size_usd,
+                    leverage=self.config.leverage,
+                    zscore=signal.zscore_5m,
+                    divergence=signal.divergence_pct,
+                    probability=signal.probability_pct,
+                    trend=signal.trend.value,
+                )
         else:
             logger.error("Failed to open pair trade")
 
@@ -306,6 +333,14 @@ class BotEngine:
                 "Trade closed: %s | PNL=$%.2f (%.2f%%) | reason=%s",
                 trade_id, trade.net_pnl_usd, trade.pnl_pct, reason.value,
             )
+            if self.telegram:
+                await self.telegram.notify_exit(
+                    trade_id=trade_id,
+                    reason=reason.value,
+                    pnl_usd=trade.net_pnl_usd,
+                    pnl_pct=trade.pnl_pct,
+                    direction=trade.direction.value if hasattr(trade, 'direction') else "",
+                )
 
     # ── 리스크 액션 처리 ─────────────────────────────────────
 
@@ -322,6 +357,8 @@ class BotEngine:
         )
         if success:
             logger.info("Averaging completed: %s", trade_id)
+            if self.telegram:
+                await self.telegram.notify_averaging(trade_id, message)
 
     async def _handle_size_reduction(self, trade_id: str, message: str) -> None:
         logger.info("SIZE REDUCTION: %s | %s", trade_id, message)
@@ -336,6 +373,8 @@ class BotEngine:
         )
         if success:
             logger.info("Size reduction completed: %s", trade_id)
+            if self.telegram:
+                await self.telegram.notify_size_reduction(trade_id, message)
 
     # ── 상태 조회 (대시보드용) ───────────────────────────────
 
