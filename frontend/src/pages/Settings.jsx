@@ -8,7 +8,8 @@ const MODE_DEFAULTS = {
       z_window_5m: 30,
       entry_zscore: 1.5,
       max_zscore: 3.0,
-      divergence_threshold_pct: 1.0,
+      divergence_threshold_pct: 0.3,
+      divergence_lookback: 3,
       peak_revert_ratio: 0.95,
     },
     exit: {
@@ -24,6 +25,7 @@ const MODE_DEFAULTS = {
       entry_zscore: 2.0,
       max_zscore: 3.5,
       divergence_threshold_pct: 1.5,
+      divergence_lookback: 12,
       peak_revert_ratio: 0.9,
     },
     exit: {
@@ -39,6 +41,7 @@ const MODE_DEFAULTS = {
       entry_zscore: 2.5,
       max_zscore: 4.0,
       divergence_threshold_pct: 2.0,
+      divergence_lookback: 24,
       peak_revert_ratio: 0.85,
     },
     exit: {
@@ -163,6 +166,7 @@ export default function Settings() {
           {numField("Entry Z-Score", signal, "entry_zscore", setSignal)}
           {numField("Max Z-Score", signal, "max_zscore", setSignal)}
           {numField("Divergence Threshold %", signal, "divergence_threshold_pct", setSignal)}
+          {numField("Divergence Lookback (5m bars)", signal, "divergence_lookback", setSignal)}
           {numField("Peak Revert Ratio", signal, "peak_revert_ratio", setSignal)}
         </div>
       </div>

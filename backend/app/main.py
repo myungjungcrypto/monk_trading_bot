@@ -175,6 +175,27 @@ async def bot_start(
     from backend.bot.exchanges.backpack import BackpackExchange
     from backend.bot.signal import MultiTFConfig
     from backend.bot.risk_manager import RiskConfig
+    from backend.app.models import BotConfig as BotConfigModel
+
+    # DB에서 저장된 설정 로드
+    db_signal = None
+    db_exit = None
+    db_risk_cfg = None
+    db_exchanges_cfg = None
+    try:
+        async for db in get_db():
+            result = await db.execute(select(BotConfigModel))
+            configs = {c.config_key: c.config_val for c in result.scalars().all()}
+            db_signal = configs.get("signal")
+            db_exit = configs.get("exit")
+            db_risk_cfg = configs.get("risk")
+            db_exchanges_cfg = configs.get("exchanges")
+            db_mode = configs.get("mode")
+            if db_mode and db_mode.get("value"):
+                req.trading_mode = db_mode["value"]
+            break
+    except Exception as e:
+        logger.warning("Failed to load config from DB, using defaults: %s", e)
 
     # 거래소 초기화
     exchanges = {}
@@ -209,19 +230,52 @@ async def bot_start(
     if not exchanges:
         raise HTTPException(400, "No exchanges configured. Set API keys in .env")
 
+    # 시그널 설정: DB 값 우선, 없으면 모드별 프리셋
+    signal_config = MultiTFConfig.from_mode(req.trading_mode)
+    if db_signal:
+        for key in ["z_window_5m", "entry_zscore", "max_zscore",
+                     "divergence_threshold_pct", "divergence_lookback",
+                     "peak_revert_ratio"]:
+            if key in db_signal:
+                val = db_signal[key]
+                if key == "z_window_5m" or key == "divergence_lookback":
+                    setattr(signal_config, key, int(val))
+                else:
+                    setattr(signal_config, key, float(val))
+        logger.info("Signal config loaded from DB: %s", db_signal)
+
+    # 리스크/청산 설정: DB 값 우선
+    risk_config = RiskConfig(
+        take_profit_pct=float(os.getenv("TAKE_PROFIT_PCT", "0.8")),
+        stop_loss_pct=float(os.getenv("STOP_LOSS_PCT", "-3.0")),
+        max_hold_hours=float(os.getenv("MAX_HOLD_HOURS", "24")),
+        max_open_trades=int(os.getenv("MAX_OPEN_TRADES", "3")),
+        daily_loss_limit_usd=float(os.getenv("DAILY_LOSS_LIMIT", "-200")),
+    )
+    if db_exit:
+        if "take_profit_pct" in db_exit:
+            risk_config.take_profit_pct = float(db_exit["take_profit_pct"])
+        if "stop_loss_pct" in db_exit:
+            risk_config.stop_loss_pct = float(db_exit["stop_loss_pct"])
+        if "max_hold_hours" in db_exit:
+            risk_config.max_hold_hours = float(db_exit["max_hold_hours"])
+        if "zscore_revert_threshold" in db_exit:
+            signal_config.zscore_revert_threshold = float(db_exit["zscore_revert_threshold"])
+        logger.info("Exit config loaded from DB: %s", db_exit)
+    if db_risk_cfg:
+        if "max_open_trades" in db_risk_cfg:
+            risk_config.max_open_trades = int(db_risk_cfg["max_open_trades"])
+        if "daily_loss_limit_usd" in db_risk_cfg:
+            risk_config.daily_loss_limit_usd = float(db_risk_cfg["daily_loss_limit_usd"])
+        logger.info("Risk config loaded from DB: %s", db_risk_cfg)
+
     config = BotConfig(
         position_size_usd=float(os.getenv("POSITION_SIZE_USD", "500")),
         leverage=int(os.getenv("LEVERAGE", "3")),
         paper_trading=req.paper_trading,
         trading_mode=req.trading_mode,
-        signal_config=MultiTFConfig.from_mode(req.trading_mode),
-        risk_config=RiskConfig(
-            take_profit_pct=float(os.getenv("TAKE_PROFIT_PCT", "0.8")),
-            stop_loss_pct=float(os.getenv("STOP_LOSS_PCT", "-3.0")),
-            max_hold_hours=float(os.getenv("MAX_HOLD_HOURS", "24")),
-            max_open_trades=int(os.getenv("MAX_OPEN_TRADES", "3")),
-            daily_loss_limit_usd=float(os.getenv("DAILY_LOSS_LIMIT", "-200")),
-        ),
+        signal_config=signal_config,
+        risk_config=risk_config,
     )
 
     _bot_engine = BotEngine(exchanges=exchanges, config=config)
