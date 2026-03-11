@@ -181,9 +181,14 @@ class MultiTimeframeSignalEngine:
         # 1시간봉 스프레드 히스토리
         self._spread_1h: Deque[float] = deque(maxlen=100)
 
-        # 틱 수준 peak 추적
+        # 틱 수준 peak 추적 (항상 업데이트, Layer 1/2와 독립)
         self._tick_spread_peak: float = 0.0
+        self._tick_spread_current: float = 0.0
         self._tick_spread_direction: SignalDirection = SignalDirection.NONE
+        self._peak_ready: bool = False  # peak 이후 revert 가능 상태
+
+        # 진단 로그 스로틀 (초당 1회 제한)
+        self._last_log_time: dict[str, float] = {}
 
     @property
     def has_enough_data(self) -> bool:
@@ -217,6 +222,9 @@ class MultiTimeframeSignalEngine:
         # 스프레드 히스토리 업데이트
         self._update_spreads(price_buffer)
 
+        # Layer 3 peak 추적은 항상 실행 (Layer 1/2와 독립)
+        self._update_tick_peak(price_buffer)
+
         if not self.has_enough_data:
             return signal
 
@@ -246,6 +254,11 @@ class MultiTimeframeSignalEngine:
         if abs(z5m) > self.config.max_zscore:
             return signal
         if abs(div5m) < self.config.divergence_threshold_pct:
+            if self._log_throttle("layer2_div"):
+                logger.info(
+                    "Layer2 blocked: div=%.4f%% < threshold=%.2f%% (Z=%.2f trend=%s)",
+                    div5m, self.config.divergence_threshold_pct, z5m, trend.value,
+                )
             return signal
 
         # 방향 결정 (z5m > 0 → ETH 과매수 → LONG_BTC_SHORT_ETH)
@@ -256,15 +269,31 @@ class MultiTimeframeSignalEngine:
 
         # 추세 방향과 일치하는지 확인
         if not self._trend_matches(trend, direction):
+            if self._log_throttle("trend_mismatch"):
+                logger.info(
+                    "Layer1/2 trend mismatch: trend=%s direction=%s Z=%.2f",
+                    trend.value, direction.value, z5m,
+                )
             return signal
 
         # ── Layer 3: 틱 수준 peak 수렴 감지 ──
-        peak_reverted = self._is_reverting(price_buffer, direction)
+        peak_reverted = self._check_peak_revert(direction)
         signal.peak_revert_detected = peak_reverted
         if not peak_reverted:
+            if self._log_throttle("layer3"):
+                logger.info(
+                    "Layer3 blocked: peak=%.4f current=%.4f ratio=%.2f (need <=%.2f) dir=%s",
+                    self._tick_spread_peak, self._tick_spread_current,
+                    self.config.peak_revert_ratio, self.config.peak_revert_ratio,
+                    direction.value,
+                )
             return signal
 
         # 3개 레이어 모두 통과
+        logger.info(
+            "ALL LAYERS PASSED: Z=%.2f div=%.2f%% trend=%s dir=%s peak=%.4f",
+            z5m, div5m, trend.value, direction.value, self._tick_spread_peak,
+        )
         signal.should_enter = True
         signal.direction = direction
         return signal
@@ -338,46 +367,70 @@ class MultiTimeframeSignalEngine:
 
     # ── Layer 3: Peak 수렴 감지 ─────────────────────────────
 
-    def _is_reverting(self, price_buffer: PriceBuffer, direction: SignalDirection) -> bool:
+    def _update_tick_peak(self, price_buffer: PriceBuffer) -> None:
         """
-        실시간 틱 기준으로 스프레드가 peak에서 수렴 전환하는지 감지합니다.
-
-        peak_spread * revert_ratio 이하로 내려오면 수렴 전환으로 판단.
+        틱 스프레드의 peak을 항상 추적합니다.
+        Layer 1/2 통과 여부와 무관하게 매 틱마다 호출.
         """
         btc_ticks = price_buffer.btc.get_recent_ticks(100)
         eth_ticks = price_buffer.eth.get_recent_ticks(100)
 
         if len(btc_ticks) < 10 or len(eth_ticks) < 10:
-            return False
+            return
 
-        # 최근 틱들의 가격으로 스프레드 추정
         btc_latest = btc_ticks[-1].price
         eth_latest = eth_ticks[-1].price
         btc_base = btc_ticks[-min(50, len(btc_ticks))].price
         eth_base = eth_ticks[-min(50, len(eth_ticks))].price
 
         if btc_base == 0 or eth_base == 0:
-            return False
+            return
 
         current_spread = (eth_latest / eth_base - 1) * 100 - (btc_latest / btc_base - 1) * 100
+        self._tick_spread_current = current_spread
         abs_spread = abs(current_spread)
 
         # peak 업데이트
         if abs_spread > abs(self._tick_spread_peak):
             self._tick_spread_peak = current_spread
-            self._tick_spread_direction = direction
+            self._peak_ready = True
+            # 방향 추적: spread > 0 → ETH 과매수
+            self._tick_spread_direction = (
+                SignalDirection.LONG_BTC_SHORT_ETH if current_spread > 0
+                else SignalDirection.SHORT_BTC_LONG_ETH
+            )
+
+    def _check_peak_revert(self, direction: SignalDirection) -> bool:
+        """
+        peak에서 수렴 전환이 감지되었는지 확인합니다.
+        _update_tick_peak()에서 이미 peak이 추적되고 있으므로
+        여기서는 revert 조건만 체크합니다.
+        """
+        if not self._peak_ready:
             return False
 
-        # peak에서 revert_ratio 이하로 내려왔는지
         if abs(self._tick_spread_peak) < 0.01:
             return False
 
+        abs_current = abs(self._tick_spread_current)
         revert_level = abs(self._tick_spread_peak) * self.config.peak_revert_ratio
-        if abs_spread <= revert_level and self._tick_spread_direction == direction:
+
+        if abs_current <= revert_level and self._tick_spread_direction == direction:
             # 수렴 감지 → peak 리셋
             self._tick_spread_peak = 0.0
+            self._peak_ready = False
             return True
 
+        return False
+
+    def _log_throttle(self, key: str, interval: float = 30.0) -> bool:
+        """진단 로그를 interval초에 1회로 제한합니다."""
+        import time
+        now = time.time()
+        last = self._last_log_time.get(key, 0.0)
+        if now - last >= interval:
+            self._last_log_time[key] = now
+            return True
         return False
 
     # ── 스프레드 히스토리 업데이트 ──────────────────────────
@@ -418,7 +471,9 @@ class MultiTimeframeSignalEngine:
         self._spread_5m.clear()
         self._spread_1h.clear()
         self._tick_spread_peak = 0.0
+        self._tick_spread_current = 0.0
         self._tick_spread_direction = SignalDirection.NONE
+        self._peak_ready = False
 
     def get_status(self) -> dict:
         """현재 엔진 상태 (대시보드용)."""
@@ -438,6 +493,8 @@ class MultiTimeframeSignalEngine:
             "window": self.config.z_window_5m,
             "has_enough_data": self.has_enough_data,
             "peak_spread": round(self._tick_spread_peak, 4),
+            "current_tick_spread": round(self._tick_spread_current, 4),
+            "peak_ready": self._peak_ready,
         }
 
 
