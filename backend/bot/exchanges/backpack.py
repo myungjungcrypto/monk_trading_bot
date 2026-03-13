@@ -258,18 +258,31 @@ class BackpackExchange(BaseExchange):
             },
             authenticated=False,
         )
-        return [
-            {
-                "open_time": candle[0],
-                "open": float(candle[1]),
-                "high": float(candle[2]),
-                "low": float(candle[3]),
-                "close": float(candle[4]),
-                "volume": float(candle[5]),
-                "close_time": candle[6],
-            }
-            for candle in (data or [])
-        ]
+        result = []
+        for candle in (data or []):
+            if isinstance(candle, dict):
+                # 딕셔너리 형식: {"open": ..., "close": ..., ...}
+                result.append({
+                    "open_time": candle.get("startTime", candle.get("openTime", candle.get("t", 0))),
+                    "open": float(candle.get("open", candle.get("o", 0))),
+                    "high": float(candle.get("high", candle.get("h", 0))),
+                    "low": float(candle.get("low", candle.get("l", 0))),
+                    "close": float(candle.get("close", candle.get("c", 0))),
+                    "volume": float(candle.get("volume", candle.get("v", 0))),
+                    "close_time": candle.get("endTime", candle.get("closeTime", candle.get("T", 0))),
+                })
+            elif isinstance(candle, (list, tuple)):
+                # 배열 형식: [open_time, open, high, low, close, volume, close_time]
+                result.append({
+                    "open_time": candle[0],
+                    "open": float(candle[1]),
+                    "high": float(candle[2]),
+                    "low": float(candle[3]),
+                    "close": float(candle[4]),
+                    "volume": float(candle[5]),
+                    "close_time": candle[6] if len(candle) > 6 else 0,
+                })
+        return result
 
     async def get_orderbook(self, symbol: str) -> Dict[str, List[List[float]]]:
         data = await self._request(
