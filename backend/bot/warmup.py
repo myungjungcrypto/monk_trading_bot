@@ -5,8 +5,9 @@ PriceBuffer와 SignalEngine을 즉시 사용 가능 상태로 만듭니다.
 재시작해도 10시간 대기 없이 바로 시그널 생성 가능.
 """
 
+import asyncio
 import logging
-from typing import Dict, List, Any
+from typing import Any, Dict, List
 
 from backend.bot.exchanges.base import BaseExchange
 from backend.bot.price_buffer import Candle, PriceBuffer
@@ -45,7 +46,7 @@ async def warmup(
         )
 
         if not btc_5m or not eth_5m:
-            logger.warning("Warmup: failed to fetch 5m klines")
+            logger.warning("Warmup: no 5m klines loaded — will wait for live data")
             return False
 
         # PriceBuffer에 캔들 주입
@@ -67,8 +68,41 @@ async def warmup(
         return True
 
     except Exception as e:
-        logger.error("Warmup failed: %s", e, exc_info=True)
+        logger.error("Warmup failed: %s (%s)", e, type(e).__name__, exc_info=True)
         return False
+
+
+async def _fetch_one(
+    exchange: BaseExchange,
+    symbol: str,
+    interval: str,
+    limit: int,
+    label: str,
+) -> list[Candle]:
+    """단일 kline 요청 + 에러 핸들링."""
+    try:
+        raw = await exchange.get_klines(symbol, interval, limit=limit)
+        logger.info("Warmup: %s raw response type=%s len=%s",
+                     label, type(raw).__name__, len(raw) if isinstance(raw, list) else "N/A")
+
+        if not isinstance(raw, list):
+            logger.warning("Warmup: %s unexpected response: %s", label, repr(raw)[:200])
+            return []
+
+        if not raw:
+            logger.warning("Warmup: %s returned empty list", label)
+            return []
+
+        candles = _klines_to_candles(raw)
+        logger.info("Warmup: loaded %d %s candles (first close=%.2f, last close=%.2f)",
+                     len(candles), label,
+                     candles[0].close if candles else 0,
+                     candles[-1].close if candles else 0)
+        return candles
+
+    except Exception as e:
+        logger.warning("Warmup: %s fetch failed: %s (%s)", label, e, type(e).__name__)
+        return []
 
 
 async def _fetch_klines(
@@ -77,44 +111,33 @@ async def _fetch_klines(
     eth_sym: str,
 ) -> tuple[list[Candle], list[Candle], list[Candle], list[Candle]]:
     """거래소에서 5분봉/1시간봉 klines를 가져와 Candle로 변환."""
-    import asyncio
-
-    results = await asyncio.gather(
-        exchange.get_klines(btc_sym, "5m", limit=200),
-        exchange.get_klines(eth_sym, "5m", limit=200),
-        exchange.get_klines(btc_sym, "1h", limit=100),
-        exchange.get_klines(eth_sym, "1h", limit=100),
-        return_exceptions=True,
+    btc_5m, eth_5m, btc_1h, eth_1h = await asyncio.gather(
+        _fetch_one(exchange, btc_sym, "5m", 200, "BTC 5m"),
+        _fetch_one(exchange, eth_sym, "5m", 200, "ETH 5m"),
+        _fetch_one(exchange, btc_sym, "1h", 100, "BTC 1h"),
+        _fetch_one(exchange, eth_sym, "1h", 100, "ETH 1h"),
     )
-
-    out: list[list[Candle]] = []
-    labels = ["BTC 5m", "ETH 5m", "BTC 1h", "ETH 1h"]
-    for i, (result, label) in enumerate(zip(results, labels)):
-        if isinstance(result, Exception):
-            logger.warning("Warmup: %s kline fetch failed: %s", label, result)
-            out.append([])
-        else:
-            candles = _klines_to_candles(result)
-            logger.info("Warmup: loaded %d %s candles", len(candles), label)
-            out.append(candles)
-
-    return out[0], out[1], out[2], out[3]
+    return btc_5m, eth_5m, btc_1h, eth_1h
 
 
 def _klines_to_candles(klines: List[Dict[str, Any]]) -> list[Candle]:
     """거래소 kline 응답을 Candle 리스트로 변환."""
     candles = []
     for k in klines:
-        candles.append(Candle(
-            open_time=int(k.get("open_time", 0)),
-            close_time=int(k.get("close_time", 0)),
-            open=float(k.get("open", 0)),
-            high=float(k.get("high", 0)),
-            low=float(k.get("low", 0)),
-            close=float(k.get("close", 0)),
-            volume=int(float(k.get("volume", 0))),
-            is_closed=True,
-        ))
+        try:
+            candles.append(Candle(
+                open_time=int(k.get("open_time", 0)),
+                close_time=int(k.get("close_time", 0)),
+                open=float(k.get("open", 0)),
+                high=float(k.get("high", 0)),
+                low=float(k.get("low", 0)),
+                close=float(k.get("close", 0)),
+                volume=int(float(k.get("volume", 0))),
+                is_closed=True,
+            ))
+        except (TypeError, ValueError, AttributeError) as e:
+            logger.warning("Warmup: skipping malformed kline: %s (error: %s)", repr(k)[:100], e)
+            continue
     return candles
 
 
@@ -139,7 +162,6 @@ def _prefill_spreads(
 
     min_len = min(len(btc_5m_closes), len(eth_5m_closes))
     if min_len >= 2:
-        # 양쪽 길이 맞추기 (뒤에서부터)
         btc_prices = btc_5m_closes[-min_len:]
         eth_prices = eth_5m_closes[-min_len:]
 

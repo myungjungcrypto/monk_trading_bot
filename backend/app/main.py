@@ -234,15 +234,27 @@ async def bot_start(
     signal_config = MultiTFConfig.from_mode(req.trading_mode)
     if db_signal:
         for key in ["z_window_5m", "entry_zscore", "max_zscore",
-                     "divergence_threshold_pct", "divergence_lookback",
                      "peak_revert_ratio"]:
             if key in db_signal:
                 val = db_signal[key]
-                if key == "z_window_5m" or key == "divergence_lookback":
+                if key == "z_window_5m":
                     setattr(signal_config, key, int(val))
                 else:
                     setattr(signal_config, key, float(val))
+        # divergence_threshold_pct / divergence_lookback:
+        # DB에 저장된 이전 기본값(>=0.1)은 실제 시장 데이터와 맞지 않아
+        # 코드 프리셋을 우선 사용. 사용자가 직접 낮은 값으로 설정한 경우만 반영.
+        if "divergence_threshold_pct" in db_signal:
+            db_div = float(db_signal["divergence_threshold_pct"])
+            if db_div < 0.1:
+                signal_config.divergence_threshold_pct = db_div
+        if "divergence_lookback" in db_signal:
+            db_lb = int(db_signal["divergence_lookback"])
+            if db_lb >= 6:
+                signal_config.divergence_lookback = db_lb
         logger.info("Signal config loaded from DB: %s", db_signal)
+        logger.info("Effective signal config: div_threshold=%.4f%%, div_lookback=%d",
+                     signal_config.divergence_threshold_pct, signal_config.divergence_lookback)
 
     # 리스크/청산 설정: DB 값 우선
     risk_config = RiskConfig(
