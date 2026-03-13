@@ -118,8 +118,8 @@ class MultiTFConfig:
             z_window_5m=30,
             entry_zscore=1.5,
             max_zscore=3.0,
-            divergence_threshold_pct=0.3,
-            divergence_lookback=3,
+            divergence_threshold_pct=0.05,
+            divergence_lookback=6,
             peak_revert_ratio=0.95,
             zscore_revert_threshold=0.3,
         )
@@ -131,7 +131,8 @@ class MultiTFConfig:
             z_window_5m=50,
             entry_zscore=2.0,
             max_zscore=3.5,
-            divergence_threshold_pct=1.5,
+            divergence_threshold_pct=0.15,
+            divergence_lookback=12,
             peak_revert_ratio=0.90,
             zscore_revert_threshold=0.5,
         )
@@ -143,7 +144,8 @@ class MultiTFConfig:
             z_window_5m=100,
             entry_zscore=2.5,
             max_zscore=4.0,
-            divergence_threshold_pct=2.0,
+            divergence_threshold_pct=0.30,
+            divergence_lookback=24,
             peak_revert_ratio=0.85,
             zscore_revert_threshold=0.8,
         )
