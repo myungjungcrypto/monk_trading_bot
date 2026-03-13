@@ -34,6 +34,7 @@ from backend.bot.signal import (
     SignalEngine,
 )
 from backend.bot.telegram_notifier import TelegramNotifier
+from backend.bot.warmup import warmup
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,13 @@ class BotEngine:
 
         # 틱 이벤트 리스너 등록
         self.price_hub.add_listener(self._on_tick)
+
+        # 과거 캔들 로드 (warm-up) — 재시작 시 대기 시간 제거
+        warmup_ok = await warmup(self.exchanges, self.price_buffer, self.signal_engine)
+        if warmup_ok:
+            logger.info("Warmup succeeded — signal engine ready immediately")
+        else:
+            logger.warning("Warmup failed — will wait for live data to accumulate")
 
         # 텔레그램 봇 시작 알림
         if self.telegram:
