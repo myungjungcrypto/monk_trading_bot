@@ -168,6 +168,131 @@ async def get_trade_summary(
     }
 
 
+@trades_router.get("/analytics")
+async def get_trade_analytics(
+    db: AsyncSession = Depends(get_db),
+    _user: TokenData = Depends(get_current_user),
+):
+    """상세 거래 분석을 반환합니다 (승률, 평균 PNL, 모드별 분석 등)."""
+    result = await db.execute(select(Trade).where(Trade.closed_at.isnot(None)))
+    closed_trades = result.scalars().all()
+
+    if not closed_trades:
+        return {"message": "No closed trades found", "total_trades": 0}
+
+    pnls = [t.net_pnl_usd or 0 for t in closed_trades]
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p < 0]
+
+    # 모드별 분석
+    mode_stats = {}
+    for t in closed_trades:
+        mode = t.signal_mode or "unknown"
+        if mode not in mode_stats:
+            mode_stats[mode] = {"trades": 0, "wins": 0, "total_pnl": 0.0, "pnls": []}
+        mode_stats[mode]["trades"] += 1
+        pnl = t.net_pnl_usd or 0
+        mode_stats[mode]["total_pnl"] += pnl
+        mode_stats[mode]["pnls"].append(pnl)
+        if pnl > 0:
+            mode_stats[mode]["wins"] += 1
+
+    mode_analysis = {}
+    for mode, s in mode_stats.items():
+        mode_pnls = s["pnls"]
+        mode_analysis[mode] = {
+            "trades": s["trades"],
+            "wins": s["wins"],
+            "losses": s["trades"] - s["wins"],
+            "win_rate": round(s["wins"] / s["trades"] * 100, 1) if s["trades"] > 0 else 0,
+            "total_pnl": round(s["total_pnl"], 2),
+            "avg_pnl": round(s["total_pnl"] / s["trades"], 2) if s["trades"] > 0 else 0,
+            "best_trade": round(max(mode_pnls), 2) if mode_pnls else 0,
+            "worst_trade": round(min(mode_pnls), 2) if mode_pnls else 0,
+        }
+
+    # 방향별 분석
+    dir_stats = {}
+    for t in closed_trades:
+        d = t.direction or "unknown"
+        if d not in dir_stats:
+            dir_stats[d] = {"trades": 0, "wins": 0, "total_pnl": 0.0}
+        dir_stats[d]["trades"] += 1
+        pnl = t.net_pnl_usd or 0
+        dir_stats[d]["total_pnl"] += pnl
+        if pnl > 0:
+            dir_stats[d]["wins"] += 1
+
+    direction_analysis = {}
+    for d, s in dir_stats.items():
+        direction_analysis[d] = {
+            "trades": s["trades"],
+            "win_rate": round(s["wins"] / s["trades"] * 100, 1) if s["trades"] > 0 else 0,
+            "total_pnl": round(s["total_pnl"], 2),
+        }
+
+    # 청산 사유별 분석
+    reason_stats = {}
+    for t in closed_trades:
+        r = t.exit_reason or "unknown"
+        if r not in reason_stats:
+            reason_stats[r] = {"count": 0, "total_pnl": 0.0}
+        reason_stats[r]["count"] += 1
+        reason_stats[r]["total_pnl"] += (t.net_pnl_usd or 0)
+
+    exit_analysis = {
+        r: {"count": s["count"], "total_pnl": round(s["total_pnl"], 2)}
+        for r, s in reason_stats.items()
+    }
+
+    # Z-score 구간별 승률
+    zscore_buckets = {"1.0-1.5": [], "1.5-2.0": [], "2.0-2.5": [], "2.5-3.0": [], "3.0+": []}
+    for t in closed_trades:
+        z = abs(t.zscore_entry or 0)
+        pnl = t.net_pnl_usd or 0
+        if z < 1.5:
+            zscore_buckets["1.0-1.5"].append(pnl)
+        elif z < 2.0:
+            zscore_buckets["1.5-2.0"].append(pnl)
+        elif z < 2.5:
+            zscore_buckets["2.0-2.5"].append(pnl)
+        elif z < 3.0:
+            zscore_buckets["2.5-3.0"].append(pnl)
+        else:
+            zscore_buckets["3.0+"].append(pnl)
+
+    zscore_analysis = {}
+    for bucket, bucket_pnls in zscore_buckets.items():
+        if bucket_pnls:
+            w = sum(1 for p in bucket_pnls if p > 0)
+            zscore_analysis[bucket] = {
+                "trades": len(bucket_pnls),
+                "win_rate": round(w / len(bucket_pnls) * 100, 1),
+                "avg_pnl": round(sum(bucket_pnls) / len(bucket_pnls), 2),
+            }
+
+    # Profit Factor
+    total_wins_sum = sum(wins) if wins else 0
+    total_losses_sum = abs(sum(losses)) if losses else 0
+    profit_factor = round(total_wins_sum / total_losses_sum, 2) if total_losses_sum > 0 else float('inf')
+
+    return {
+        "total_trades": len(closed_trades),
+        "win_rate": round(len(wins) / len(closed_trades) * 100, 1),
+        "total_pnl": round(sum(pnls), 2),
+        "avg_pnl_per_trade": round(sum(pnls) / len(pnls), 2),
+        "avg_win": round(sum(wins) / len(wins), 2) if wins else 0,
+        "avg_loss": round(sum(losses) / len(losses), 2) if losses else 0,
+        "best_trade": round(max(pnls), 2),
+        "worst_trade": round(min(pnls), 2),
+        "profit_factor": profit_factor,
+        "by_mode": mode_analysis,
+        "by_direction": direction_analysis,
+        "by_exit_reason": exit_analysis,
+        "by_zscore": zscore_analysis,
+    }
+
+
 # ── PNL 스냅샷 ──────────────────────────────────────────
 
 pnl_router = APIRouter(prefix="/api/pnl", tags=["pnl"])

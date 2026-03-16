@@ -34,6 +34,7 @@ from backend.bot.signal import (
     SignalEngine,
 )
 from backend.bot.telegram_notifier import TelegramNotifier
+from backend.bot.trade_recorder import TradeRecorder
 from backend.bot.warmup import warmup
 
 logger = logging.getLogger(__name__)
@@ -96,6 +97,10 @@ class BotEngine:
         # 텔레그램 알림
         self.telegram = TelegramNotifier.from_env()
 
+        # 거래 기록기 (DB persistence)
+        self.trade_recorder: Optional[TradeRecorder] = None
+        self._trade_db_ids: Dict[str, int] = {}  # trade_id → DB id 매핑
+
         # 상태
         self._running = False
         self._tick_count = 0
@@ -105,6 +110,11 @@ class BotEngine:
 
         # 첫 번째 활성 거래소 (주문 실행용)
         self._primary_exchange: Optional[BaseExchange] = None
+
+    def set_session_factory(self, session_factory) -> None:
+        """DB 세션 팩토리를 설정하여 거래 기록을 활성화합니다."""
+        self.trade_recorder = TradeRecorder(session_factory)
+        logger.info("Trade recorder initialized — trades will be persisted to DB")
 
     @property
     def is_running(self) -> bool:
@@ -305,6 +315,11 @@ class BotEngine:
 
         if trade:
             logger.info("Trade opened: %s | PNL tracking started", trade.trade_id)
+            # DB에 기록
+            if self.trade_recorder:
+                db_id = await self.trade_recorder.record_open(trade, signal_mode=self.config.trading_mode)
+                if db_id:
+                    self._trade_db_ids[trade.trade_id] = db_id
             if self.telegram:
                 await self.telegram.notify_entry(
                     direction=direction.value,
@@ -341,6 +356,10 @@ class BotEngine:
                 "Trade closed: %s | PNL=$%.2f (%.2f%%) | reason=%s",
                 trade_id, trade.net_pnl_usd, trade.pnl_pct, reason.value,
             )
+            # DB에 청산 기록
+            db_id = self._trade_db_ids.pop(trade_id, None)
+            if db_id and self.trade_recorder:
+                await self.trade_recorder.record_close(db_id, trade, reason.value)
             if self.telegram:
                 await self.telegram.notify_exit(
                     trade_id=trade_id,

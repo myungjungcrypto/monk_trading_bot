@@ -72,6 +72,7 @@ async def lifespan(app: FastAPI):
     logger.info("Using database: %s", db_url.split("@")[-1] if "@" in db_url else db_url)
     session_factory, engine = create_async_session_factory(db_url)
     set_session_factory(session_factory)
+    app.state.session_factory = session_factory  # 봇 엔진에서 사용
     await init_db(engine)
 
     # 기본 admin 사용자 생성 (없으면)
@@ -291,6 +292,10 @@ async def bot_start(
     )
 
     _bot_engine = BotEngine(exchanges=exchanges, config=config)
+    # DB 세션 팩토리 연결 → 거래 기록 자동 저장
+    sf = getattr(app, 'state', None) and getattr(app.state, 'session_factory', None)
+    if sf is not None:
+        _bot_engine.set_session_factory(sf)
     broadcaster.set_bot_engine(_bot_engine)
     _bot_task = asyncio.create_task(_bot_engine.start())
 
