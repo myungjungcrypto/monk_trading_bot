@@ -134,7 +134,7 @@ class MultiTFConfig:
             divergence_threshold_pct=0.03,
             divergence_lookback=12,
             peak_revert_ratio=0.90,
-            zscore_revert_threshold=0.5,
+            zscore_revert_threshold=1.5,
         )
 
     @classmethod

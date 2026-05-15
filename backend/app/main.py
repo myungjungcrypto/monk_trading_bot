@@ -274,6 +274,8 @@ async def bot_start(
             risk_config.max_hold_hours = float(db_exit["max_hold_hours"])
         if "zscore_revert_threshold" in db_exit:
             signal_config.zscore_revert_threshold = float(db_exit["zscore_revert_threshold"])
+        if "min_hold_minutes" in db_exit:
+            risk_config.min_hold_minutes = float(db_exit["min_hold_minutes"])
         logger.info("Exit config loaded from DB: %s", db_exit)
     if db_risk_cfg:
         if "max_open_trades" in db_risk_cfg:

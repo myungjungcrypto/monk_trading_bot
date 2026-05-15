@@ -16,6 +16,7 @@ const MODE_DEFAULTS = {
       take_profit_pct: 0.4,
       stop_loss_pct: -1.5,
       zscore_revert_threshold: 0.3,
+      min_hold_minutes: 5,
       max_hold_hours: 2,
     },
   },
@@ -31,7 +32,8 @@ const MODE_DEFAULTS = {
     exit: {
       take_profit_pct: 0.8,
       stop_loss_pct: -3.0,
-      zscore_revert_threshold: 0.5,
+      zscore_revert_threshold: 1.5,
+      min_hold_minutes: 120,
       max_hold_hours: 12,
     },
   },
@@ -47,7 +49,8 @@ const MODE_DEFAULTS = {
     exit: {
       take_profit_pct: 2.0,
       stop_loss_pct: -5.0,
-      zscore_revert_threshold: 0.8,
+      zscore_revert_threshold: 1.5,
+      min_hold_minutes: 240,
       max_hold_hours: 48,
     },
   },
@@ -178,6 +181,7 @@ export default function Settings() {
           {numField("Take Profit %", exit, "take_profit_pct", setExit)}
           {numField("Stop Loss %", exit, "stop_loss_pct", setExit)}
           {numField("Z-Score Revert Threshold", exit, "zscore_revert_threshold", setExit)}
+          {numField("Min Hold Minutes", exit, "min_hold_minutes", setExit)}
           {numField("Max Hold Hours", exit, "max_hold_hours", setExit)}
         </div>
       </div>

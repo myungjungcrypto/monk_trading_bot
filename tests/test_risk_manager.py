@@ -132,18 +132,31 @@ class TestTimeout:
 
 
 class TestZscoreRevert:
-    def test_exit_on_revert_with_profit(self):
-        rm = RiskManager(RiskConfig(take_profit_pct=5.0))
+    def test_exit_on_revert_with_profit_after_min_hold(self):
+        rm = RiskManager(RiskConfig(take_profit_pct=5.0, min_hold_minutes=0.0))
         trade = _make_trade(pnl_btc=2.0, pnl_eth=1.0)  # +0.3%
         decision = rm.evaluate(trade, zscore_reverted=True)
         assert decision.action == RiskAction.EXIT
         assert decision.reason == ExitReason.ZSCORE_REVERT
 
+    def test_no_exit_on_revert_before_min_hold(self):
+        rm = RiskManager(RiskConfig(take_profit_pct=5.0, min_hold_minutes=120.0))
+        trade = _make_trade(pnl_btc=2.0, pnl_eth=1.0)  # +0.3%, just opened
+        decision = rm.evaluate(trade, zscore_reverted=True)
+        assert decision.action == RiskAction.HOLD
+
+    def test_exit_on_revert_after_min_hold_elapsed(self):
+        rm = RiskManager(RiskConfig(take_profit_pct=5.0, min_hold_minutes=120.0))
+        trade = _make_trade(pnl_btc=2.0, pnl_eth=1.0,
+                            opened_at=time.time() - 130 * 60)  # 130분 전
+        decision = rm.evaluate(trade, zscore_reverted=True)
+        assert decision.action == RiskAction.EXIT
+        assert decision.reason == ExitReason.ZSCORE_REVERT
+
     def test_no_exit_on_revert_with_loss(self):
-        rm = RiskManager(RiskConfig(take_profit_pct=5.0, stop_loss_pct=-5.0))
+        rm = RiskManager(RiskConfig(take_profit_pct=5.0, stop_loss_pct=-5.0, min_hold_minutes=0.0))
         trade = _make_trade(pnl_btc=-2.0, pnl_eth=-1.0)  # -0.3%
         decision = rm.evaluate(trade, zscore_reverted=True)
-        # 손실 상태에서 z-score revert은 청산 안 함
         assert decision.action != RiskAction.EXIT or decision.reason != ExitReason.ZSCORE_REVERT
 
 

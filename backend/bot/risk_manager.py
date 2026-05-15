@@ -60,6 +60,9 @@ class RiskConfig:
     max_open_trades: int = 3
     daily_loss_limit_usd: float = -200.0
 
+    # Z-score 청산 최소 보유 시간 (분) — 백테스트 최적: 120분
+    min_hold_minutes: float = 120.0
+
     # Averaging
     averaging_enabled: bool = True
     averaging_trigger_pct: float = -1.5
@@ -133,13 +136,15 @@ class RiskManager:
             if trailing is not None:
                 return trailing
 
-        # 5. Z-score 수렴 청산
+        # 5. Z-score 수렴 청산 (최소 보유 시간 체크)
         if zscore_reverted and pnl_pct > 0:
-            return RiskDecision(
-                action=RiskAction.EXIT,
-                reason=ExitReason.ZSCORE_REVERT,
-                message=f"Z-score reverted with profit: {pnl_pct:.2f}%",
-            )
+            hold_minutes = (time.time() - trade.opened_at) / 60.0
+            if hold_minutes >= self.config.min_hold_minutes:
+                return RiskDecision(
+                    action=RiskAction.EXIT,
+                    reason=ExitReason.ZSCORE_REVERT,
+                    message=f"Z-score reverted with profit: {pnl_pct:.2f}% (held {hold_minutes:.0f}m)",
+                )
 
         # 6. 최대 보유 시간 초과
         hold_hours = (time.time() - trade.opened_at) / 3600.0

@@ -212,10 +212,12 @@ class BotEngine:
             else:
                 # 포지션 있으면 → Z-score 수렴 청산 체크
                 if signal.should_exit_zscore:
+                    min_hold = self.risk_manager.config.min_hold_minutes
                     for trade_id, trade in list(self.position_manager.open_trades.items()):
-                        if trade.net_pnl_usd > 0:  # 수익 중일 때만 Z-score 수렴 청산
+                        hold_minutes = (time.time() - trade.opened_at) / 60.0
+                        if trade.net_pnl_usd > 0 and hold_minutes >= min_hold:
                             await self._handle_exit(trade_id, ExitReason.ZSCORE,
-                                                     f"Z-score reverted (z={signal.zscore_current:.2f})")
+                                                     f"Z-score reverted (z={signal.zscore_current:.2f}, held {hold_minutes:.0f}m)")
 
         except Exception as e:
             error_msg = f"Tick handler error: {e}"
