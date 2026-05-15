@@ -39,6 +39,11 @@ from backend.bot.warmup import warmup
 
 logger = logging.getLogger(__name__)
 
+EXECUTION_ALERT_ONLY = "alert_only"
+EXECUTION_PAPER = "paper"
+EXECUTION_LIVE = "live"
+VIRTUAL_EXCHANGE_NAME = "virtual"
+
 
 @dataclass
 class BotConfig:
@@ -47,6 +52,8 @@ class BotConfig:
     position_size_usd: float = 500.0
     leverage: int = 3
     paper_trading: bool = False
+    execution_mode: str = EXECUTION_ALERT_ONLY
+    primary_exchange: str = "lighter"
 
     # 운영 모드
     trading_mode: str = "swing"
@@ -93,9 +100,16 @@ class BotEngine:
         # 거래 엔진
         self.position_manager = PositionManager()
         self.risk_manager = RiskManager(self.config.risk_config or RiskConfig())
-
-        # 텔레그램 알림
+        self.execution_mode = self._normalize_execution_mode(
+            self.config.execution_mode,
+            self.config.paper_trading,
+        )
         self.telegram = TelegramNotifier.from_env()
+
+        if self._uses_virtual_positions:
+            # Repeated averaging/reduction alerts are not useful before live orders.
+            self.risk_manager.config.averaging_enabled = False
+            self.risk_manager.config.size_reduction_enabled = False
 
         # 거래 기록기 (DB persistence)
         self.trade_recorder: Optional[TradeRecorder] = None
@@ -116,6 +130,17 @@ class BotEngine:
         self.trade_recorder = TradeRecorder(session_factory)
         logger.info("Trade recorder initialized — trades will be persisted to DB")
 
+    @staticmethod
+    def _normalize_execution_mode(mode: str, paper_trading: bool) -> str:
+        normalized = (mode or "").lower().strip()
+        if normalized in {EXECUTION_ALERT_ONLY, EXECUTION_PAPER, EXECUTION_LIVE}:
+            return normalized
+        return EXECUTION_PAPER if paper_trading else EXECUTION_LIVE
+
+    @property
+    def _uses_virtual_positions(self) -> bool:
+        return self.execution_mode in {EXECUTION_ALERT_ONLY, EXECUTION_PAPER}
+
     @property
     def is_running(self) -> bool:
         return self._running
@@ -124,15 +149,24 @@ class BotEngine:
 
     async def start(self) -> None:
         """봇을 시작합니다. PriceHub + 포지션 모니터링을 비동기 병렬 실행."""
-        self._running = True
-
         logger.info("Bot engine starting... mode=%s exchanges=%s",
                      self.config.trading_mode, list(self.exchanges.keys()))
-        logger.info("Config: size=$%.0f, leverage=%dx, paper=%s",
-                     self.config.position_size_usd, self.config.leverage, self.config.paper_trading)
+        logger.info("Config: size=$%.0f, leverage=%dx, execution=%s, telegram=%s",
+                     self.config.position_size_usd, self.config.leverage,
+                     self.execution_mode, bool(self.telegram))
 
         # 첫 번째 활성 거래소를 기본 주문 실행 거래소로 설정
-        self._primary_exchange = next(iter(self.exchanges.values()), None)
+        self._primary_exchange = (
+            self.exchanges.get(self.config.primary_exchange)
+            or next(iter(self.exchanges.values()), None)
+        )
+        await self._validate_live_execution()
+        self._running = True
+        if self.telegram:
+            await self.telegram.status(
+                f"Bot started: mode={self.config.trading_mode}, "
+                f"execution={self.execution_mode}, primary={self.config.primary_exchange}"
+            )
 
         # 틱 이벤트 리스너 등록
         self.price_hub.add_listener(self._on_tick)
@@ -183,6 +217,21 @@ class BotEngine:
 
         logger.info("Bot engine stopped.")
 
+    async def _validate_live_execution(self) -> None:
+        if self.execution_mode != EXECUTION_LIVE:
+            return
+        if self._primary_exchange is None:
+            raise RuntimeError("Live execution requested but no primary exchange is configured")
+        live_ready = getattr(self._primary_exchange, "live_trading_ready", True)
+        if live_ready is False:
+            message = (
+                f"{self._primary_exchange.name} is not ready for live trading. "
+                "Use alert_only/paper first or configure the exchange live flags."
+            )
+            if self.telegram:
+                await self.telegram.error("Live trading blocked", message)
+            raise RuntimeError(message)
+
     # ── 틱 이벤트 핸들러 ─────────────────────────────────────
 
     async def _on_tick(
@@ -212,12 +261,13 @@ class BotEngine:
             else:
                 # 포지션 있으면 → Z-score 수렴 청산 체크
                 if signal.should_exit_zscore:
-                    min_hold = self.risk_manager.config.min_hold_minutes
                     for trade_id, trade in list(self.position_manager.open_trades.items()):
-                        hold_minutes = (time.time() - trade.opened_at) / 60.0
-                        if trade.net_pnl_usd > 0 and hold_minutes >= min_hold:
-                            await self._handle_exit(trade_id, ExitReason.ZSCORE,
-                                                     f"Z-score reverted (z={signal.zscore_current:.2f}, held {hold_minutes:.0f}m)")
+                        decision = self.risk_manager.evaluate(trade, zscore_reverted=True)
+                        if (
+                            decision.action == RiskAction.EXIT
+                            and decision.reason == ExitReason.ZSCORE_REVERT
+                        ):
+                            await self._handle_exit(trade_id, decision.reason, decision.message)
 
         except Exception as e:
             error_msg = f"Tick handler error: {e}"
@@ -232,8 +282,23 @@ class BotEngine:
         """포지션 PNL을 주기적으로 체크하여 TP/SL/Trailing/Timeout 처리."""
         while self._running:
             try:
-                if self.position_manager.has_open_position and self._primary_exchange:
-                    await self.position_manager.update_positions(self._primary_exchange)
+                if self.position_manager.has_open_position:
+                    if self._uses_virtual_positions:
+                        btc_price = self.price_buffer.btc.last_price
+                        eth_price = self.price_buffer.eth.last_price
+                        if btc_price is None or eth_price is None:
+                            await asyncio.sleep(self.config.position_check_interval)
+                            continue
+                        self.position_manager.update_virtual_positions(
+                            VIRTUAL_EXCHANGE_NAME,
+                            btc_price,
+                            eth_price,
+                        )
+                    elif self._primary_exchange:
+                        await self.position_manager.update_positions(self._primary_exchange)
+                    else:
+                        await asyncio.sleep(self.config.position_check_interval)
+                        continue
 
                     for trade_id, trade in list(self.position_manager.open_trades.items()):
                         signal = self.signal_engine.evaluate(self.price_buffer)
@@ -298,12 +363,41 @@ class BotEngine:
             signal.probability_pct, signal.trend.value,
         )
 
-        if self.config.paper_trading:
-            logger.info("[PAPER] Would open pair: %s $%.0f", direction.value, self.config.position_size_usd)
+        btc_price = self.price_buffer.btc.last_price
+        eth_price = self.price_buffer.eth.last_price
+        if btc_price is None or eth_price is None:
+            logger.error("Cannot enter without BTC/ETH prices")
+            return
+
+        if self.telegram:
+            await self.telegram.entry_signal(
+                signal=signal,
+                direction=direction.value,
+                execution_mode=self.execution_mode,
+                size_usd=self.config.position_size_usd,
+                btc_price=btc_price,
+                eth_price=eth_price,
+            )
+
+        if self._uses_virtual_positions:
+            trade = self.position_manager.open_virtual_pair(
+                exchange_name=VIRTUAL_EXCHANGE_NAME,
+                direction=direction,
+                size_usd=self.config.position_size_usd,
+                btc_price=btc_price,
+                eth_price=eth_price,
+                zscore=signal.zscore_5m,
+                spread_pct=signal.divergence_pct,
+            )
+            if trade:
+                if self.telegram:
+                    await self.telegram.trade_opened(trade, self.execution_mode)
             return
 
         if self._primary_exchange is None:
             logger.error("No exchange available for order execution")
+            if self.telegram:
+                await self.telegram.error("No exchange available for live order execution")
             return
 
         trade = await self.position_manager.open_pair(
@@ -335,6 +429,8 @@ class BotEngine:
                 )
         else:
             logger.error("Failed to open pair trade")
+            if self.telegram:
+                await self.telegram.error("Failed to open pair trade", direction.value)
 
     # ── 청산 처리 ───────────────────────────────────────────
 
@@ -342,10 +438,12 @@ class BotEngine:
         """포지션을 청산합니다."""
         logger.info("EXIT: %s | reason=%s | %s", trade_id, reason.value, message)
 
-        if self.config.paper_trading:
-            trade = self.position_manager.open_trades.get(trade_id)
+        if self._uses_virtual_positions:
+            trade = self.position_manager.close_virtual_pair(trade_id, reason.value)
             if trade:
-                logger.info("[PAPER] Would close pair: PNL=$%.2f (%.2f%%)", trade.net_pnl_usd, trade.pnl_pct)
+                self.risk_manager.on_trade_closed(trade_id, trade.net_pnl_usd)
+                if self.telegram:
+                    await self.telegram.trade_closed(trade, reason.value, message)
             return
 
         if self._primary_exchange is None:
@@ -375,8 +473,8 @@ class BotEngine:
 
     async def _handle_averaging(self, trade_id: str, message: str) -> None:
         logger.info("AVERAGING: %s | %s", trade_id, message)
-        if self.config.paper_trading:
-            logger.info("[PAPER] Would average down: %s", trade_id)
+        if self._uses_virtual_positions:
+            logger.info("[%s] Averaging ignored for virtual trade: %s", self.execution_mode.upper(), trade_id)
             return
         if self._primary_exchange is None:
             return
@@ -391,8 +489,8 @@ class BotEngine:
 
     async def _handle_size_reduction(self, trade_id: str, message: str) -> None:
         logger.info("SIZE REDUCTION: %s | %s", trade_id, message)
-        if self.config.paper_trading:
-            logger.info("[PAPER] Would reduce size: %s", trade_id)
+        if self._uses_virtual_positions:
+            logger.info("[%s] Size reduction ignored for virtual trade: %s", self.execution_mode.upper(), trade_id)
             return
         if self._primary_exchange is None:
             return
@@ -416,6 +514,9 @@ class BotEngine:
             "signal_count": self._signal_count,
             "last_tick": self._last_tick_time,
             "paper_trading": self.config.paper_trading,
+            "execution_mode": self.execution_mode,
+            "primary_exchange": self._primary_exchange.name if self._primary_exchange else None,
+            "telegram_enabled": bool(self.telegram and self.telegram.enabled),
             "signal": self.signal_engine.get_status(),
             "positions": self.position_manager.get_summary(),
             "risk": self.risk_manager.get_status(),
@@ -467,9 +568,20 @@ async def run_bot():
     # Lighter (API 문서 확인 후 활성화)
     lt_key = os.getenv("LIGHTER_API_KEY")
     lt_secret = os.getenv("LIGHTER_SECRET_KEY")
-    if lt_key and lt_secret:
+    lt_private = os.getenv("LIGHTER_PRIVATE_KEY")
+    lt_account = os.getenv("LIGHTER_ACCOUNT_INDEX")
+    lt_key_index = os.getenv("LIGHTER_API_KEY_INDEX")
+    if lt_key or lt_secret or lt_private:
         from backend.bot.exchanges.lighter import LighterExchange
-        exchanges["lighter"] = LighterExchange(api_key=lt_key, secret_key=lt_secret)
+        exchanges["lighter"] = LighterExchange(
+            api_key=lt_key or "",
+            secret_key=lt_secret or "",
+            private_key=lt_private,
+            account_index=int(lt_account) if lt_account else None,
+            api_key_index=int(lt_key_index) if lt_key_index else None,
+            btc_market_id=int(os.getenv("LIGHTER_BTC_MARKET_ID", "1")),
+            eth_market_id=int(os.getenv("LIGHTER_ETH_MARKET_ID", "0")),
+        )
         logger.info("Lighter exchange initialized")
 
     if not exchanges:
@@ -478,18 +590,31 @@ async def run_bot():
 
     # 설정
     trading_mode = os.getenv("TRADING_MODE", "swing")
+    paper_trading = os.getenv("PAPER_TRADING", "true").lower() == "true"
+    execution_mode = os.getenv(
+        "EXECUTION_MODE",
+        EXECUTION_PAPER if paper_trading else EXECUTION_LIVE,
+    )
+    signal_cfg = MultiTFConfig.from_mode(trading_mode)
+    signal_cfg.zscore_revert_threshold = float(
+        os.getenv("ZSCORE_REVERT_THRESHOLD", str(signal_cfg.zscore_revert_threshold))
+    )
     config = BotConfig(
         position_size_usd=float(os.getenv("POSITION_SIZE_USD", "500")),
         leverage=int(os.getenv("LEVERAGE", "3")),
-        paper_trading=os.getenv("PAPER_TRADING", "true").lower() == "true",
+        paper_trading=paper_trading,
+        execution_mode=execution_mode,
+        primary_exchange=os.getenv("PRIMARY_EXCHANGE", "lighter"),
         trading_mode=trading_mode,
-        signal_config=MultiTFConfig.from_mode(trading_mode),
+        signal_config=signal_cfg,
         risk_config=RiskConfig(
             take_profit_pct=float(os.getenv("TAKE_PROFIT_PCT", "0.8")),
             stop_loss_pct=float(os.getenv("STOP_LOSS_PCT", "-3.0")),
-            max_hold_hours=float(os.getenv("MAX_HOLD_HOURS", "24")),
+            max_hold_hours=float(os.getenv("MAX_HOLD_HOURS", "12")),
             max_open_trades=int(os.getenv("MAX_OPEN_TRADES", "3")),
             daily_loss_limit_usd=float(os.getenv("DAILY_LOSS_LIMIT", "-200")),
+            min_hold_minutes=float(os.getenv("MIN_HOLD_MINUTES", "120")),
+            zscore_exit_min_pnl_pct=float(os.getenv("ZSCORE_EXIT_MIN_PNL_PCT", "0.0")),
         ),
     )
 

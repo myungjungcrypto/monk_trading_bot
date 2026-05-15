@@ -60,9 +60,6 @@ class RiskConfig:
     max_open_trades: int = 3
     daily_loss_limit_usd: float = -200.0
 
-    # Z-score 청산 최소 보유 시간 (분) — 백테스트 최적: 120분
-    min_hold_minutes: float = 120.0
-
     # Averaging
     averaging_enabled: bool = True
     averaging_trigger_pct: float = -1.5
@@ -72,6 +69,11 @@ class RiskConfig:
     size_reduction_enabled: bool = True
     size_reduction_trigger_pct: float = -2.0
     size_reduction_ratio: float = 0.5
+
+    # Z-score 청산 최소 보유 시간 (분) — 백테스트 최적: 120분
+    min_hold_minutes: float = 120.0
+    # 방안 C: Z-score 청산 최소 수익률 (%)
+    zscore_exit_min_pnl_pct: float = 0.0
 
 
 class RiskManager:
@@ -92,21 +94,28 @@ class RiskManager:
 
     # ── 메인 판단 ─────────────────────────────────────────────
 
-    def evaluate(self, trade: PairTrade, zscore_reverted: bool = False) -> RiskDecision:
+    def evaluate(
+        self,
+        trade: PairTrade,
+        zscore_reverted: bool = False,
+        current_time: Optional[float] = None,
+    ) -> RiskDecision:
         """
         트레이드에 대한 리스크 판단을 수행합니다.
 
         Args:
             trade: 오픈 트레이드
             zscore_reverted: Z-score가 수렴 임계값 이하인지
+            current_time: 시뮬레이션 시간 (None이면 time.time())
 
         Returns:
             RiskDecision
         """
         pnl_pct = trade.pnl_pct
+        now = current_time if current_time is not None else time.time()
 
         # 1. 일일 손실 한도 체크
-        self._check_daily_reset()
+        self._check_daily_reset(current_time=current_time)
         if self._daily_realized_pnl <= self.config.daily_loss_limit_usd:
             return RiskDecision(
                 action=RiskAction.EXIT,
@@ -136,18 +145,21 @@ class RiskManager:
             if trailing is not None:
                 return trailing
 
-        # 5. Z-score 수렴 청산 (최소 보유 시간 체크)
-        if zscore_reverted and pnl_pct > 0:
-            hold_minutes = (time.time() - trade.opened_at) / 60.0
-            if hold_minutes >= self.config.min_hold_minutes:
-                return RiskDecision(
-                    action=RiskAction.EXIT,
-                    reason=ExitReason.ZSCORE_REVERT,
-                    message=f"Z-score reverted with profit: {pnl_pct:.2f}% (held {hold_minutes:.0f}m)",
-                )
+        # 5. Z-score 수렴 청산
+        hold_minutes = (now - trade.opened_at) / 60.0
+        if (
+            zscore_reverted
+            and pnl_pct > self.config.zscore_exit_min_pnl_pct   # 방안 C
+            and hold_minutes >= self.config.min_hold_minutes      # 방안 B
+        ):
+            return RiskDecision(
+                action=RiskAction.EXIT,
+                reason=ExitReason.ZSCORE_REVERT,
+                message=f"Z-score reverted with profit: {pnl_pct:.2f}% (hold={hold_minutes:.1f}m)",
+            )
 
         # 6. 최대 보유 시간 초과
-        hold_hours = (time.time() - trade.opened_at) / 3600.0
+        hold_hours = (now - trade.opened_at) / 3600.0
         if hold_hours >= self.config.max_hold_hours:
             return RiskDecision(
                 action=RiskAction.EXIT,
@@ -216,15 +228,18 @@ class RiskManager:
 
     # ── 일일 손실 관리 ────────────────────────────────────────
 
-    def record_realized_pnl(self, pnl_usd: float) -> None:
+    def record_realized_pnl(self, pnl_usd: float, current_time: Optional[float] = None) -> None:
         """실현 PNL을 기록합니다."""
-        self._check_daily_reset()
+        self._check_daily_reset(current_time=current_time)
         self._daily_realized_pnl += pnl_usd
         logger.info("Daily PNL updated: $%.2f (total: $%.2f)", pnl_usd, self._daily_realized_pnl)
 
-    def _check_daily_reset(self) -> None:
+    def _check_daily_reset(self, current_time: Optional[float] = None) -> None:
         """날짜가 바뀌면 일일 PNL을 리셋합니다."""
-        today = time.strftime("%Y-%m-%d")
+        if current_time is not None:
+            today = time.strftime("%Y-%m-%d", time.gmtime(current_time))
+        else:
+            today = time.strftime("%Y-%m-%d")
         if today != self._daily_reset_date:
             self._daily_realized_pnl = 0.0
             self._daily_reset_date = today
@@ -253,9 +268,9 @@ class RiskManager:
 
     # ── 트레이드 종료 정리 ────────────────────────────────────
 
-    def on_trade_closed(self, trade_id: str, realized_pnl: float) -> None:
+    def on_trade_closed(self, trade_id: str, realized_pnl: float, current_time: Optional[float] = None) -> None:
         """트레이드가 종료되었을 때 호출합니다."""
-        self.record_realized_pnl(realized_pnl)
+        self.record_realized_pnl(realized_pnl, current_time=current_time)
         self._peak_pnl_pct.pop(trade_id, None)
 
     # ── 설정 ──────────────────────────────────────────────────

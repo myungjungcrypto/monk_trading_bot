@@ -15,6 +15,9 @@ alembic>=1.13.0
 aiohttp>=3.9.0
 requests>=2.31.0
 
+# Optional: required only when LIGHTER_LIVE_TRADING_ENABLED=true
+# lighter-sdk
+
 # Crypto (Ed25519 signing for Backpack)
 cryptography>=41.0.0
 

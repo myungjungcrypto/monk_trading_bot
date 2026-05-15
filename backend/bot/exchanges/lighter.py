@@ -1,18 +1,20 @@
 """
 Lighter Exchange 커넥터.
 
-인증: API Key + HMAC-SHA256 서명
-Base URL: TBD (API 문서 확인 필요)
-Perp 심볼: BTC-PERP, ETH-PERP (예상)
+인증: Lighter 공식 SDK SignerClient 기반
+Base URL: https://mainnet.zklighter.elliot.ai
+WS URL:   wss://mainnet.zklighter.elliot.ai/stream
 
 특이사항: 수수료가 ~0%로 스캘핑에 최적화된 거래소.
-NOTE: API 문서 확인 후 엔드포인트/파라미터를 업데이트해야 합니다.
+NOTE: live 주문은 SDK/계정 설정과 LIGHTER_LIVE_TRADING_ENABLED=true가 모두 필요합니다.
 """
 
+import asyncio
 import hashlib
 import hmac
 import json
 import logging
+import os
 import time
 from typing import Any, Dict, List, Optional
 
@@ -32,10 +34,7 @@ from backend.bot.exchanges.base import (
 
 logger = logging.getLogger(__name__)
 
-_PERP_SYMBOLS = {
-    "BTC": "BTC-PERP",
-    "ETH": "ETH-PERP",
-}
+_PERP_SYMBOLS = {"BTC": "BTC", "ETH": "ETH"}
 
 
 class LighterExchange(BaseExchange):
@@ -43,28 +42,55 @@ class LighterExchange(BaseExchange):
     Lighter Exchange API 커넥터.
 
     수수료 ~0%로 스캘핑 전략에 적합합니다.
-    HMAC-SHA256 서명 기반 인증을 사용합니다.
+    공개 ticker WebSocket은 키 없이 사용하고, live 주문은 공식 SDK signer를 사용합니다.
     """
 
     name = "lighter"
-    BASE_URL = "https://api.lighter.exchange"  # TBD
-    WS_URL = "wss://ws.lighter.exchange"  # TBD
+    BASE_URL = "https://mainnet.zklighter.elliot.ai"
+    WS_URL = "wss://mainnet.zklighter.elliot.ai/stream"
 
     def __init__(
         self,
-        api_key: str,
-        secret_key: str,
+        api_key: str = "",
+        secret_key: str = "",
+        private_key: Optional[str] = None,
+        account_index: Optional[int] = None,
+        api_key_index: Optional[int] = None,
+        btc_market_id: int = 1,
+        eth_market_id: int = 0,
         base_url: Optional[str] = None,
         ws_url: Optional[str] = None,
     ):
         self.api_key = api_key
         self.secret_key = secret_key
+        self.private_key = private_key or secret_key
+        self.account_index = account_index
+        self.api_key_index = api_key_index
+        self.market_ids = {"BTC": btc_market_id, "ETH": eth_market_id}
+        self.market_symbols = {btc_market_id: "BTC", eth_market_id: "ETH"}
+        self.base_decimals = {
+            "BTC": int(os.getenv("LIGHTER_BTC_BASE_DECIMALS", "5")),
+            "ETH": int(os.getenv("LIGHTER_ETH_BASE_DECIMALS", "4")),
+        }
+        self.price_decimals = int(os.getenv("LIGHTER_PRICE_DECIMALS", "2"))
+        self.live_enabled = os.getenv("LIGHTER_LIVE_TRADING_ENABLED", "false").lower() == "true"
         self.base_url = (base_url or self.BASE_URL).rstrip("/")
         self.ws_url = ws_url or self.WS_URL
         self._session: Optional[aiohttp.ClientSession] = None
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._ws_running: bool = False
         self._ws_task: Optional[Any] = None
+        self._last_tickers: Dict[str, Ticker] = {}
+        self._signer = None
+
+    @property
+    def live_trading_ready(self) -> bool:
+        return bool(
+            self.live_enabled
+            and self.private_key
+            and self.account_index is not None
+            and self.api_key_index is not None
+        )
 
     # ── HTTP 세션 ────────────────────────────────────────
 
@@ -135,20 +161,75 @@ class LighterExchange(BaseExchange):
         error_msg = data.get("message", str(data)) if isinstance(data, dict) else str(data)
         raise LighterAPIError(resp.status, error_msg)
 
+    def _market_id(self, symbol: str) -> int:
+        asset = symbol.split("-")[0].split("/")[0].upper()
+        if asset not in self.market_ids:
+            raise LighterAPIError(400, f"Unknown Lighter symbol: {symbol}")
+        return self.market_ids[asset]
+
+    def _asset_from_symbol(self, symbol: str) -> str:
+        return symbol.split("-")[0].split("/")[0].upper()
+
+    def _to_base_amount(self, symbol: str, quantity: float) -> int:
+        asset = self._asset_from_symbol(symbol)
+        return int(round(quantity * (10 ** self.base_decimals[asset])))
+
+    def _to_base_price(self, price: float) -> int:
+        return int(round(price * (10 ** self.price_decimals)))
+
+    def _client_order_index(self) -> int:
+        return int(time.time() * 1000) % (2 ** 48 - 1)
+
+    def _get_signer(self):
+        if self._signer is not None:
+            return self._signer
+        if not self.live_trading_ready:
+            raise LighterAPIError(
+                403,
+                "Lighter live trading is disabled. Set LIGHTER_LIVE_TRADING_ENABLED=true, "
+                "LIGHTER_PRIVATE_KEY, LIGHTER_ACCOUNT_INDEX, and LIGHTER_API_KEY_INDEX.",
+            )
+        try:
+            import lighter  # type: ignore
+        except ImportError as exc:
+            raise LighterAPIError(500, "Install the official lighter-sdk package for live trading") from exc
+
+        try:
+            signer = lighter.SignerClient(
+                url=self.base_url,
+                private_key=self.private_key,
+                account_index=self.account_index,
+                api_key_index=self.api_key_index,
+            )
+        except TypeError:
+            signer = lighter.SignerClient(
+                url=self.base_url,
+                api_private_keys={self.api_key_index: self.private_key},
+                account_index=self.account_index,
+            )
+
+        check = getattr(signer, "check_client", None)
+        if check is not None:
+            err = check()
+            if err is not None:
+                raise LighterAPIError(500, f"Lighter signer check failed: {err}")
+
+        self._signer = signer
+        return signer
+
     # ── 시세 데이터 ──────────────────────────────────────
 
     async def get_ticker(self, symbol: str) -> Ticker:
-        data = await self._request("GET", "/api/v1/ticker", {"symbol": symbol}, authenticated=False)
-        return self._parse_ticker(symbol, data)
+        cached = self._last_tickers.get(symbol)
+        if cached is not None:
+            return cached
+        raise LighterAPIError(
+            503,
+            f"No cached Lighter ticker for {symbol}. Start WebSocket before trading.",
+        )
 
     async def get_tickers(self, symbols: List[str]) -> Dict[str, Ticker]:
-        data = await self._request("GET", "/api/v1/tickers", authenticated=False)
-        result = {}
-        for item in (data or []):
-            sym = item.get("symbol", "")
-            if sym in symbols:
-                result[sym] = self._parse_ticker(sym, item)
-        return result
+        return {sym: self._last_tickers[sym] for sym in symbols if sym in self._last_tickers}
 
     async def get_klines(self, symbol: str, interval: str, limit: int = 100) -> List[Dict[str, Any]]:
         data = await self._request(
@@ -187,19 +268,58 @@ class LighterExchange(BaseExchange):
         price: Optional[float] = None,
         reduce_only: bool = False,
     ) -> OrderResult:
-        params: Dict[str, Any] = {
-            "symbol": symbol,
-            "side": side.value,
-            "type": order_type.value,
-            "quantity": str(quantity),
-        }
-        if price is not None:
-            params["price"] = str(price)
-        if reduce_only:
-            params["reduceOnly"] = True
+        signer = self._get_signer()
+        ticker = await self.get_ticker(symbol)
+        mark = ticker.last_price
+        if price is None:
+            # Market orders still need a worst acceptable price in the SDK.
+            price = mark * (1.01 if side == OrderSide.BUY else 0.99)
 
-        data = await self._request("POST", "/api/v1/order", params)
-        return self._parse_order(data)
+        order_type_value = (
+            signer.ORDER_TYPE_MARKET
+            if order_type == OrderType.MARKET
+            else signer.ORDER_TYPE_LIMIT
+        )
+        tif = (
+            signer.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL
+            if order_type == OrderType.MARKET
+            else signer.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME
+        )
+        expiry = (
+            signer.DEFAULT_IOC_EXPIRY
+            if order_type == OrderType.MARKET
+            else signer.DEFAULT_28_DAY_ORDER_EXPIRY
+        )
+        client_order_index = self._client_order_index()
+        base_amount = self._to_base_amount(symbol, quantity)
+        base_price = self._to_base_price(price)
+
+        tx, tx_hash, err = await signer.create_order(
+            market_index=self._market_id(symbol),
+            client_order_index=client_order_index,
+            base_amount=base_amount,
+            price=base_price,
+            is_ask=side == OrderSide.SELL,
+            order_type=order_type_value,
+            time_in_force=tif,
+            reduce_only=reduce_only,
+            order_expiry=expiry,
+        )
+        if err is not None:
+            raise LighterAPIError(500, f"Lighter create_order failed: {err}")
+
+        return OrderResult(
+            order_id=str(client_order_index),
+            symbol=symbol,
+            side=side,
+            order_type=order_type,
+            quantity=quantity,
+            price=price,
+            filled_quantity=quantity,
+            avg_fill_price=mark,
+            status="SUBMITTED",
+            raw={"tx": tx, "tx_hash": tx_hash},
+        )
 
     async def cancel_order(self, symbol: str, order_id: str) -> bool:
         try:
@@ -229,24 +349,40 @@ class LighterExchange(BaseExchange):
         return None
 
     async def get_positions(self) -> List[Position]:
-        data = await self._request("GET", "/api/v1/positions")
-        if not data:
+        if self.account_index is None:
             return []
-        if isinstance(data, dict):
-            data = [data]
+
+        data = await self._request(
+            "GET",
+            "/api/v1/account",
+            {"account_index": self.account_index},
+            authenticated=False,
+        )
+        positions = data.get("positions", data.get("account", {}).get("positions", {}))
+        if isinstance(positions, dict):
+            raw_positions = list(positions.values())
+        else:
+            raw_positions = positions or []
+
         result = []
-        for item in data:
-            size = float(item.get("size", item.get("quantity", 0)))
+        for item in raw_positions:
+            market_id = int(item.get("market_id", item.get("market_index", -1)))
+            symbol = self.market_symbols.get(market_id, item.get("symbol", ""))
+            size = abs(float(item.get("position", item.get("size", 0)) or 0))
             if size == 0:
                 continue
+            sign = int(item.get("sign", 1))
+            ticker = self._last_tickers.get(symbol)
+            mark = ticker.last_price if ticker else float(item.get("mark_price", item.get("avg_entry_price", 0)) or 0)
             result.append(Position(
-                symbol=item.get("symbol", ""),
-                side=PositionSide.LONG if item.get("side", "").lower() == "long" else PositionSide.SHORT,
-                size=abs(size),
-                entry_price=float(item.get("entryPrice", 0)),
-                mark_price=float(item.get("markPrice", 0)),
-                unrealized_pnl=float(item.get("unrealizedPnl", 0)),
-                leverage=float(item.get("leverage", 1)),
+                symbol=symbol,
+                side=PositionSide.LONG if sign >= 0 else PositionSide.SHORT,
+                size=size,
+                entry_price=float(item.get("avg_entry_price", 0) or 0),
+                mark_price=mark,
+                unrealized_pnl=float(item.get("unrealized_pnl", 0) or 0),
+                leverage=1.0,
+                liquidation_price=_safe_float(item.get("liquidation_price")),
                 raw=item,
             ))
         return result
@@ -259,12 +395,8 @@ class LighterExchange(BaseExchange):
         return await self.place_order(symbol, close_side, pos.size, OrderType.MARKET, reduce_only=True)
 
     async def set_leverage(self, symbol: str, leverage: int) -> bool:
-        try:
-            await self._request("POST", "/api/v1/leverage", {"symbol": symbol, "leverage": leverage})
-            return True
-        except LighterAPIError as e:
-            logger.warning("Lighter set_leverage failed: %s", e)
-            return False
+        logger.info("Lighter leverage is controlled by margin/account settings; requested %s=%dx", symbol, leverage)
+        return True
 
     # ── 계정 ─────────────────────────────────────────────
 
@@ -290,8 +422,6 @@ class LighterExchange(BaseExchange):
     # ── WebSocket ────────────────────────────────────────
 
     async def connect_ws(self, symbols: List[str], on_tick: TickCallback) -> None:
-        import asyncio
-
         self._ws_running = True
 
         async def _run():
@@ -302,8 +432,9 @@ class LighterExchange(BaseExchange):
                     logger.info("Lighter WS connected")
 
                     for sym in symbols:
-                        await self._ws.send_json({"op": "subscribe", "channel": "ticker", "symbol": sym})
-                        logger.info("Lighter WS subscribed: %s", sym)
+                        market_id = self._market_id(sym)
+                        await self._ws.send_json({"type": "subscribe", "channel": f"ticker/{market_id}"})
+                        logger.info("Lighter WS subscribed: ticker/%s (%s)", market_id, sym)
 
                     async for msg in self._ws:
                         if not self._ws_running:
@@ -325,15 +456,41 @@ class LighterExchange(BaseExchange):
 
     async def _handle_ws_tick(self, data: dict, on_tick: TickCallback) -> None:
         channel = data.get("channel", "")
-        if channel != "ticker":
+        msg_type = data.get("type", "")
+        if not (channel.startswith("ticker:") and msg_type in {"update/ticker", "subscribed/ticker"}):
             return
-        payload = data.get("data", data)
-        symbol = payload.get("symbol", "")
-        price_str = payload.get("lastPrice") or payload.get("last") or payload.get("c")
-        if not price_str:
+
+        payload = data.get("ticker", {})
+        try:
+            market_id = int(channel.split(":", 1)[1])
+        except (IndexError, ValueError):
             return
-        price = float(price_str)
-        ts = int(payload.get("timestamp", time.time() * 1000))
+
+        symbol = self.market_symbols.get(market_id) or payload.get("s", "")
+        ask = payload.get("a") or {}
+        bid = payload.get("b") or {}
+        ask_price = _safe_float(ask.get("price"))
+        bid_price = _safe_float(bid.get("price"))
+        if ask_price is None and bid_price is None:
+            return
+        if ask_price is None:
+            price = bid_price or 0.0
+        elif bid_price is None:
+            price = ask_price
+        else:
+            price = (ask_price + bid_price) / 2.0
+        ts = int(data.get("timestamp", time.time() * 1000))
+        ticker = Ticker(
+            symbol=symbol,
+            last_price=price,
+            bid_price=bid_price or price,
+            ask_price=ask_price or price,
+            volume_24h=0.0,
+            high_24h=price,
+            low_24h=price,
+            timestamp=ts,
+        )
+        self._last_tickers[symbol] = ticker
         await on_tick(self.name, symbol, price, ts)
 
     async def disconnect_ws(self) -> None:

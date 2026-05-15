@@ -35,9 +35,19 @@ export const getMe = () => api.get("/api/auth/me");
 
 // Bot
 export const getBotStatus = () => api.get("/api/bot/status");
-export const startBot = (trading_mode = "swing", paper_trading = true) =>
-  api.post("/api/bot/start", { trading_mode, paper_trading });
+export const startBot = (
+  trading_mode = "swing",
+  paper_trading = true,
+  execution_mode = null,
+  primary_exchange = null,
+) => api.post("/api/bot/start", {
+  trading_mode,
+  paper_trading,
+  execution_mode,
+  primary_exchange,
+});
 export const stopBot = () => api.post("/api/bot/stop");
+export const testTelegram = () => api.post("/api/bot/test-telegram");
 
 // Config
 export const getConfigs = () => api.get("/api/config/");

@@ -18,6 +18,7 @@ const MODE_DEFAULTS = {
       zscore_revert_threshold: 0.3,
       min_hold_minutes: 5,
       max_hold_hours: 2,
+      zscore_exit_min_pnl_pct: 0.0,
     },
   },
   swing: {
@@ -33,8 +34,9 @@ const MODE_DEFAULTS = {
       take_profit_pct: 0.8,
       stop_loss_pct: -3.0,
       zscore_revert_threshold: 1.5,
-      min_hold_minutes: 120,
       max_hold_hours: 12,
+      min_hold_minutes: 120,
+      zscore_exit_min_pnl_pct: 0.0,
     },
   },
   position: {
@@ -52,12 +54,17 @@ const MODE_DEFAULTS = {
       zscore_revert_threshold: 1.5,
       min_hold_minutes: 240,
       max_hold_hours: 48,
+      zscore_exit_min_pnl_pct: 0.0,
     },
   },
 };
 
 export default function Settings() {
   const [mode, setMode] = useState("swing");
+  const [execution, setExecution] = useState({
+    mode: "alert_only",
+    primary_exchange: "lighter",
+  });
   const [signal, setSignal] = useState(MODE_DEFAULTS.swing.signal);
   const [exit, setExit] = useState(MODE_DEFAULTS.swing.exit);
   const [exchanges, setExchanges] = useState({
@@ -82,6 +89,7 @@ export default function Settings() {
         const configs = {};
         res.data.forEach((c) => (configs[c.config_key] = c.config_val));
         if (configs.mode) setMode(configs.mode.value || "swing");
+        if (configs.execution) setExecution(configs.execution);
         if (configs.signal) setSignal(configs.signal);
         if (configs.exit) setExit(configs.exit);
         if (configs.exchanges) setExchanges(configs.exchanges);
@@ -106,6 +114,7 @@ export default function Settings() {
     try {
       await Promise.all([
         upsertConfig("mode", { value: mode }),
+        upsertConfig("execution", execution),
         upsertConfig("signal", signal),
         upsertConfig("exit", exit),
         upsertConfig("exchanges", exchanges),
@@ -161,6 +170,39 @@ export default function Settings() {
         </div>
       </div>
 
+      {/* Execution */}
+      <div style={styles.card}>
+        <h3 style={styles.cardTitle}>Execution</h3>
+        <div style={styles.fieldGrid}>
+          <div style={styles.field}>
+            <label style={styles.label}>Mode</label>
+            <select
+              value={execution.mode}
+              onChange={(e) => setExecution({ ...execution, mode: e.target.value })}
+              style={styles.input}
+            >
+              <option value="alert_only">Alert Only</option>
+              <option value="paper">Paper</option>
+              <option value="live">Live</option>
+            </select>
+          </div>
+          <div style={styles.field}>
+            <label style={styles.label}>Primary Exchange</label>
+            <select
+              value={execution.primary_exchange}
+              onChange={(e) => setExecution({ ...execution, primary_exchange: e.target.value })}
+              style={styles.input}
+            >
+              {Object.keys(exchanges).map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      </div>
+
       {/* Signal Parameters */}
       <div style={styles.card}>
         <h3 style={styles.cardTitle}>Signal Parameters</h3>
@@ -183,6 +225,7 @@ export default function Settings() {
           {numField("Z-Score Revert Threshold", exit, "zscore_revert_threshold", setExit)}
           {numField("Min Hold Minutes", exit, "min_hold_minutes", setExit)}
           {numField("Max Hold Hours", exit, "max_hold_hours", setExit)}
+          {numField("Z-Score Exit Min PnL %", exit, "zscore_exit_min_pnl_pct", setExit)}
         </div>
       </div>
 
@@ -287,7 +330,7 @@ const styles = {
   },
   card: {
     background: "#1a1d29",
-    borderRadius: "12px",
+    borderRadius: "8px",
     padding: "20px",
   },
   cardTitle: {

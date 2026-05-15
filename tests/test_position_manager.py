@@ -85,3 +85,38 @@ class TestPositionManagerState:
         assert summary["open_trades"] == 0
         assert summary["total_pnl_usd"] == 0
         assert summary["trades"] == []
+
+    def test_virtual_pair_updates_pnl(self):
+        pm = PositionManager()
+        trade = pm.open_virtual_pair(
+            exchange_name="virtual",
+            direction=PairDirection.LONG_BTC_SHORT_ETH,
+            size_usd=500,
+            btc_price=100000,
+            eth_price=2000,
+            zscore=2.1,
+            spread_pct=1.7,
+        )
+
+        assert trade is not None
+        pm.update_virtual_positions("virtual", btc_price=101000, eth_price=1980)
+
+        updated = pm.open_trades[trade.trade_id]
+        assert updated.total_pnl_usd > 0
+        assert updated.btc_leg.unrealized_pnl > 0
+        assert updated.eth_leg.unrealized_pnl > 0
+
+    def test_close_virtual_pair_moves_trade_to_closed_state(self):
+        pm = PositionManager()
+        trade = pm.open_virtual_pair(
+            exchange_name="virtual",
+            direction=PairDirection.SHORT_BTC_LONG_ETH,
+            size_usd=500,
+            btc_price=100000,
+            eth_price=2000,
+        )
+
+        closed = pm.close_virtual_pair(trade.trade_id, reason="ZSCORE")
+        assert closed is not None
+        assert not closed.is_open
+        assert pm.open_trade_count == 0

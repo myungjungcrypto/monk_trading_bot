@@ -249,6 +249,105 @@ class PositionManager:
         )
         return trade
 
+    def open_virtual_pair(
+        self,
+        exchange_name: str,
+        direction: PairDirection,
+        size_usd: float,
+        btc_price: float,
+        eth_price: float,
+        zscore: float = 0.0,
+        spread_pct: float = 0.0,
+    ) -> Optional[PairTrade]:
+        """
+        실주문 없이 페어 포지션을 엽니다.
+
+        alert_only / paper 모드에서 텔레그램 진입-청산 흐름과 리스크 로직을
+        실전 주문 전에 검증하기 위한 가상 포지션입니다.
+        """
+        btc_qty = self._calculate_quantity(size_usd, btc_price, "BTC")
+        eth_qty = self._calculate_quantity(size_usd, eth_price, "ETH")
+        if btc_qty <= 0 or eth_qty <= 0:
+            logger.error("Invalid virtual quantity: BTC=%s ETH=%s", btc_qty, eth_qty)
+            return None
+
+        if direction == PairDirection.LONG_BTC_SHORT_ETH:
+            btc_side = PositionSide.LONG
+            eth_side = PositionSide.SHORT
+        else:
+            btc_side = PositionSide.SHORT
+            eth_side = PositionSide.LONG
+
+        trade_id = self._next_trade_id(exchange_name)
+        trade = PairTrade(
+            trade_id=trade_id,
+            exchange_name=exchange_name,
+            direction=direction,
+            btc_leg=LegInfo(
+                asset="BTC",
+                side=btc_side,
+                size_usd=size_usd,
+                quantity=btc_qty,
+                entry_price=btc_price,
+                current_price=btc_price,
+            ),
+            eth_leg=LegInfo(
+                asset="ETH",
+                side=eth_side,
+                size_usd=size_usd,
+                quantity=eth_qty,
+                entry_price=eth_price,
+                current_price=eth_price,
+            ),
+            opened_at=time.time(),
+            zscore_at_entry=zscore,
+            spread_at_entry=spread_pct,
+        )
+        self._open_trades[trade_id] = trade
+        logger.info(
+            "Virtual pair opened: %s | %s | BTC@%.2f ETH@%.4f | Z=%.2f",
+            trade_id, direction.value, btc_price, eth_price, zscore,
+        )
+        return trade
+
+    def update_virtual_positions(
+        self,
+        exchange_name: str,
+        btc_price: float,
+        eth_price: float,
+    ) -> None:
+        """현재 가격으로 가상 포지션의 미실현 PnL을 갱신합니다."""
+        for trade in self._open_trades.values():
+            if trade.exchange_name != exchange_name:
+                continue
+            self._update_leg_mark(trade.btc_leg, btc_price)
+            self._update_leg_mark(trade.eth_leg, eth_price)
+
+    def close_virtual_pair(self, trade_id: str, reason: str = "MANUAL") -> Optional[PairTrade]:
+        """가상 페어 포지션을 청산 기록으로 이동합니다."""
+        trade = self._open_trades.get(trade_id)
+        if trade is None:
+            logger.warning("Virtual trade not found: %s", trade_id)
+            return None
+
+        trade.is_open = False
+        trade.closed_at = time.time()
+        del self._open_trades[trade_id]
+        self._closed_trades.append(trade)
+        logger.info(
+            "Virtual pair closed: %s | reason=%s | PNL=$%.2f (%.2f%%)",
+            trade_id, reason, trade.net_pnl_usd, trade.pnl_pct,
+        )
+        return trade
+
+    @staticmethod
+    def _update_leg_mark(leg: LegInfo, price: float) -> None:
+        leg.current_price = price
+        if leg.side == PositionSide.LONG:
+            leg.unrealized_pnl = (price - leg.entry_price) * leg.quantity
+        else:
+            leg.unrealized_pnl = (leg.entry_price - price) * leg.quantity
+
     # ── 포지션 업데이트 ───────────────────────────────────────
 
     async def update_positions(self, exchange: BaseExchange) -> None:

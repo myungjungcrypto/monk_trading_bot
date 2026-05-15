@@ -13,7 +13,7 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -40,6 +40,7 @@ from backend.app.config import (
 )
 from backend.app.models import (
     Base,
+    BotConfig as DbBotConfig,
     User,
     create_async_session_factory,
     init_db,
@@ -59,6 +60,7 @@ logger = logging.getLogger(__name__)
 
 _bot_engine = None
 _bot_task: Optional[asyncio.Task] = None
+_broadcast_task: Optional[asyncio.Task] = None
 
 
 # ── Lifespan ─────────────────────────────────────────────
@@ -86,6 +88,8 @@ async def lifespan(app: FastAPI):
             logger.info("Default admin user created")
 
     logger.info("FastAPI backend started")
+    global _broadcast_task
+    _broadcast_task = asyncio.create_task(broadcaster.start_broadcast_loop())
     yield
 
     # 종료 시 봇 정지
@@ -94,6 +98,8 @@ async def lifespan(app: FastAPI):
         await _bot_engine.stop()
     if _bot_task:
         _bot_task.cancel()
+    if _broadcast_task:
+        _broadcast_task.cancel()
 
     await engine.dispose()
     logger.info("FastAPI backend stopped")
@@ -149,8 +155,167 @@ async def get_me(user: TokenData = Depends(get_current_user)):
 # ── 봇 제어 API ──────────────────────────────────────────
 
 class BotStartRequest(BaseModel):
-    trading_mode: str = "swing"
+    trading_mode: Optional[str] = None
     paper_trading: bool = True
+    execution_mode: Optional[str] = None
+    primary_exchange: Optional[str] = None
+
+
+async def _load_config_map(db: AsyncSession) -> Dict[str, Dict[str, Any]]:
+    result = await db.execute(select(DbBotConfig))
+    return {c.config_key: c.config_val or {} for c in result.scalars().all()}
+
+
+def _mode_from_request(req: BotStartRequest, configs: Dict[str, Dict[str, Any]]) -> str:
+    if req.trading_mode:
+        return req.trading_mode
+    mode_cfg = configs.get("mode", {})
+    return str(mode_cfg.get("value") or os.getenv("TRADING_MODE", "swing"))
+
+
+def _apply_attrs(obj, values: Dict[str, Any], allowed: set[str]) -> None:
+    for key, value in values.items():
+        if key in allowed and value is not None:
+            setattr(obj, key, value)
+
+
+def _build_runtime_config(req: BotStartRequest, configs: Dict[str, Dict[str, Any]]):
+    from backend.bot.engine import (
+        BotConfig,
+        EXECUTION_ALERT_ONLY,
+        EXECUTION_LIVE,
+    )
+    from backend.bot.signal import MultiTFConfig
+    from backend.bot.risk_manager import RiskConfig
+
+    trading_mode = _mode_from_request(req, configs)
+    primary_exchange = (
+        req.primary_exchange
+        or configs.get("execution", {}).get("primary_exchange")
+        or os.getenv("PRIMARY_EXCHANGE", "lighter")
+    )
+    execution_mode = (
+        req.execution_mode
+        or configs.get("execution", {}).get("mode")
+        or os.getenv("EXECUTION_MODE", EXECUTION_ALERT_ONLY)
+    )
+
+    signal_cfg = MultiTFConfig.from_mode(trading_mode)
+    _apply_attrs(
+        signal_cfg,
+        configs.get("signal", {}),
+        {"z_window_5m", "entry_zscore", "max_zscore", "peak_revert_ratio"},
+    )
+    signal_db = configs.get("signal", {})
+    if "divergence_threshold_pct" in signal_db:
+        db_div = float(signal_db["divergence_threshold_pct"])
+        if db_div < 0.1:
+            signal_cfg.divergence_threshold_pct = db_div
+    if "divergence_lookback" in signal_db:
+        db_lb = int(signal_db["divergence_lookback"])
+        if db_lb >= 6:
+            signal_cfg.divergence_lookback = db_lb
+
+    exit_cfg = configs.get("exit", {})
+    if "zscore_revert_threshold" in exit_cfg:
+        signal_cfg.zscore_revert_threshold = exit_cfg["zscore_revert_threshold"]
+
+    risk_base = RiskConfig(
+        take_profit_pct=float(os.getenv("TAKE_PROFIT_PCT", "0.8")),
+        stop_loss_pct=float(os.getenv("STOP_LOSS_PCT", "-3.0")),
+        max_hold_hours=float(os.getenv("MAX_HOLD_HOURS", "12")),
+        max_open_trades=int(os.getenv("MAX_OPEN_TRADES", "3")),
+        daily_loss_limit_usd=float(os.getenv("DAILY_LOSS_LIMIT", "-200")),
+        min_hold_minutes=float(os.getenv("MIN_HOLD_MINUTES", "120")),
+        zscore_exit_min_pnl_pct=float(os.getenv("ZSCORE_EXIT_MIN_PNL_PCT", "0.0")),
+    )
+    _apply_attrs(
+        risk_base,
+        exit_cfg,
+        {"take_profit_pct", "stop_loss_pct", "max_hold_hours", "zscore_exit_min_pnl_pct", "min_hold_minutes"},
+    )
+    _apply_attrs(
+        risk_base,
+        configs.get("risk", {}),
+        {
+            "max_open_trades",
+            "daily_loss_limit_usd",
+            "averaging_enabled",
+            "averaging_trigger_pct",
+            "averaging_multiplier",
+            "size_reduction_enabled",
+            "size_reduction_trigger_pct",
+            "size_reduction_ratio",
+        },
+    )
+
+    exchange_cfg = configs.get("exchanges", {}).get(primary_exchange, {})
+    position_size = float(exchange_cfg.get("position_size_usd", os.getenv("POSITION_SIZE_USD", "500")))
+    leverage = int(exchange_cfg.get("leverage", os.getenv("LEVERAGE", "3")))
+
+    return BotConfig(
+        position_size_usd=position_size,
+        leverage=leverage,
+        paper_trading=execution_mode != EXECUTION_LIVE,
+        execution_mode=execution_mode,
+        primary_exchange=primary_exchange,
+        trading_mode=trading_mode,
+        signal_config=signal_cfg,
+        risk_config=risk_base,
+    )
+
+
+def _exchange_enabled(configs: Dict[str, Dict[str, Any]], name: str) -> bool:
+    exchanges_cfg = configs.get("exchanges", {})
+    if name not in exchanges_cfg:
+        return True
+    return bool(exchanges_cfg.get(name, {}).get("enabled", True))
+
+
+def _build_exchanges(configs: Dict[str, Dict[str, Any]]):
+    from backend.bot.exchanges.backpack import BackpackExchange
+    from backend.bot.exchanges.extended import ExtendedExchange
+    from backend.bot.exchanges.lighter import LighterExchange
+    from backend.bot.exchanges.pacifica import PacificaExchange
+
+    exchanges = {}
+
+    if _exchange_enabled(configs, "lighter"):
+        lt_key = os.getenv("LIGHTER_API_KEY", "")
+        lt_secret = os.getenv("LIGHTER_SECRET_KEY", "")
+        lt_private = os.getenv("LIGHTER_PRIVATE_KEY")
+        lt_account = os.getenv("LIGHTER_ACCOUNT_INDEX")
+        lt_key_index = os.getenv("LIGHTER_API_KEY_INDEX")
+        # alert_only / paper 모드는 공개 ticker WebSocket만 필요하므로 키 없이도 초기화합니다.
+        exchanges["lighter"] = LighterExchange(
+            api_key=lt_key,
+            secret_key=lt_secret,
+            private_key=lt_private,
+            account_index=int(lt_account) if lt_account else None,
+            api_key_index=int(lt_key_index) if lt_key_index else None,
+            btc_market_id=int(os.getenv("LIGHTER_BTC_MARKET_ID", "1")),
+            eth_market_id=int(os.getenv("LIGHTER_ETH_MARKET_ID", "0")),
+        )
+
+    if _exchange_enabled(configs, "backpack"):
+        bp_key = os.getenv("BACKPACK_API_KEY")
+        bp_secret = os.getenv("BACKPACK_SECRET_KEY")
+        if bp_key and bp_secret:
+            exchanges["backpack"] = BackpackExchange(api_key=bp_key, secret_key=bp_secret)
+
+    if _exchange_enabled(configs, "pacifica"):
+        pac_key = os.getenv("PACIFICA_API_KEY")
+        pac_secret = os.getenv("PACIFICA_SECRET_KEY")
+        if pac_key and pac_secret:
+            exchanges["pacifica"] = PacificaExchange(api_key=pac_key, secret_key=pac_secret)
+
+    if _exchange_enabled(configs, "extended"):
+        ext_key = os.getenv("EXTENDED_API_KEY")
+        ext_secret = os.getenv("EXTENDED_SECRET_KEY")
+        if ext_key and ext_secret:
+            exchanges["extended"] = ExtendedExchange(api_key=ext_key, secret_key=ext_secret)
+
+    return exchanges
 
 
 @app.get("/api/bot/status")
@@ -164,6 +329,7 @@ async def bot_status(_user: TokenData = Depends(get_current_user)):
 @app.post("/api/bot/start")
 async def bot_start(
     req: BotStartRequest,
+    db: AsyncSession = Depends(get_db),
     _user: TokenData = Depends(get_current_user),
 ):
     """봇을 시작합니다."""
@@ -172,126 +338,13 @@ async def bot_start(
     if _bot_engine and _bot_engine.is_running:
         raise HTTPException(400, "Bot is already running")
 
-    from backend.bot.engine import BotConfig, BotEngine
-    from backend.bot.exchanges.backpack import BackpackExchange
-    from backend.bot.signal import MultiTFConfig
-    from backend.bot.risk_manager import RiskConfig
-    from backend.app.models import BotConfig as BotConfigModel
+    from backend.bot.engine import BotEngine
 
-    # DB에서 저장된 설정 로드
-    db_signal = None
-    db_exit = None
-    db_risk_cfg = None
-    db_exchanges_cfg = None
-    try:
-        async for db in get_db():
-            result = await db.execute(select(BotConfigModel))
-            configs = {c.config_key: c.config_val for c in result.scalars().all()}
-            db_signal = configs.get("signal")
-            db_exit = configs.get("exit")
-            db_risk_cfg = configs.get("risk")
-            db_exchanges_cfg = configs.get("exchanges")
-            db_mode = configs.get("mode")
-            if db_mode and db_mode.get("value"):
-                req.trading_mode = db_mode["value"]
-            break
-    except Exception as e:
-        logger.warning("Failed to load config from DB, using defaults: %s", e)
-
-    # 거래소 초기화
-    exchanges = {}
-
-    # Backpack
-    bp_key = os.getenv("BACKPACK_API_KEY")
-    bp_secret = os.getenv("BACKPACK_SECRET_KEY")
-    if bp_key and bp_secret:
-        exchanges["backpack"] = BackpackExchange(api_key=bp_key, secret_key=bp_secret)
-
-    # Pacifica
-    pac_key = os.getenv("PACIFICA_API_KEY")
-    pac_secret = os.getenv("PACIFICA_SECRET_KEY")
-    if pac_key and pac_secret:
-        from backend.bot.exchanges.pacifica import PacificaExchange
-        exchanges["pacifica"] = PacificaExchange(api_key=pac_key, secret_key=pac_secret)
-
-    # Extended
-    ext_key = os.getenv("EXTENDED_API_KEY")
-    ext_secret = os.getenv("EXTENDED_SECRET_KEY")
-    if ext_key and ext_secret:
-        from backend.bot.exchanges.extended import ExtendedExchange
-        exchanges["extended"] = ExtendedExchange(api_key=ext_key, secret_key=ext_secret)
-
-    # Lighter
-    lt_key = os.getenv("LIGHTER_API_KEY")
-    lt_secret = os.getenv("LIGHTER_SECRET_KEY")
-    if lt_key and lt_secret:
-        from backend.bot.exchanges.lighter import LighterExchange
-        exchanges["lighter"] = LighterExchange(api_key=lt_key, secret_key=lt_secret)
-
+    configs = await _load_config_map(db)
+    exchanges = _build_exchanges(configs)
     if not exchanges:
         raise HTTPException(400, "No exchanges configured. Set API keys in .env")
-
-    # 시그널 설정: DB 값 우선, 없으면 모드별 프리셋
-    signal_config = MultiTFConfig.from_mode(req.trading_mode)
-    if db_signal:
-        for key in ["z_window_5m", "entry_zscore", "max_zscore",
-                     "peak_revert_ratio"]:
-            if key in db_signal:
-                val = db_signal[key]
-                if key == "z_window_5m":
-                    setattr(signal_config, key, int(val))
-                else:
-                    setattr(signal_config, key, float(val))
-        # divergence_threshold_pct / divergence_lookback:
-        # DB에 저장된 이전 기본값(>=0.1)은 실제 시장 데이터와 맞지 않아
-        # 코드 프리셋을 우선 사용. 사용자가 직접 낮은 값으로 설정한 경우만 반영.
-        if "divergence_threshold_pct" in db_signal:
-            db_div = float(db_signal["divergence_threshold_pct"])
-            if db_div < 0.1:
-                signal_config.divergence_threshold_pct = db_div
-        if "divergence_lookback" in db_signal:
-            db_lb = int(db_signal["divergence_lookback"])
-            if db_lb >= 6:
-                signal_config.divergence_lookback = db_lb
-        logger.info("Signal config loaded from DB: %s", db_signal)
-        logger.info("Effective signal config: div_threshold=%.4f%%, div_lookback=%d",
-                     signal_config.divergence_threshold_pct, signal_config.divergence_lookback)
-
-    # 리스크/청산 설정: DB 값 우선
-    risk_config = RiskConfig(
-        take_profit_pct=float(os.getenv("TAKE_PROFIT_PCT", "0.8")),
-        stop_loss_pct=float(os.getenv("STOP_LOSS_PCT", "-3.0")),
-        max_hold_hours=float(os.getenv("MAX_HOLD_HOURS", "24")),
-        max_open_trades=int(os.getenv("MAX_OPEN_TRADES", "3")),
-        daily_loss_limit_usd=float(os.getenv("DAILY_LOSS_LIMIT", "-200")),
-    )
-    if db_exit:
-        if "take_profit_pct" in db_exit:
-            risk_config.take_profit_pct = float(db_exit["take_profit_pct"])
-        if "stop_loss_pct" in db_exit:
-            risk_config.stop_loss_pct = float(db_exit["stop_loss_pct"])
-        if "max_hold_hours" in db_exit:
-            risk_config.max_hold_hours = float(db_exit["max_hold_hours"])
-        if "zscore_revert_threshold" in db_exit:
-            signal_config.zscore_revert_threshold = float(db_exit["zscore_revert_threshold"])
-        if "min_hold_minutes" in db_exit:
-            risk_config.min_hold_minutes = float(db_exit["min_hold_minutes"])
-        logger.info("Exit config loaded from DB: %s", db_exit)
-    if db_risk_cfg:
-        if "max_open_trades" in db_risk_cfg:
-            risk_config.max_open_trades = int(db_risk_cfg["max_open_trades"])
-        if "daily_loss_limit_usd" in db_risk_cfg:
-            risk_config.daily_loss_limit_usd = float(db_risk_cfg["daily_loss_limit_usd"])
-        logger.info("Risk config loaded from DB: %s", db_risk_cfg)
-
-    config = BotConfig(
-        position_size_usd=float(os.getenv("POSITION_SIZE_USD", "500")),
-        leverage=int(os.getenv("LEVERAGE", "3")),
-        paper_trading=req.paper_trading,
-        trading_mode=req.trading_mode,
-        signal_config=signal_config,
-        risk_config=risk_config,
-    )
+    config = _build_runtime_config(req, configs)
 
     _bot_engine = BotEngine(exchanges=exchanges, config=config)
     # DB 세션 팩토리 연결 → 거래 기록 자동 저장
@@ -301,7 +354,28 @@ async def bot_start(
     broadcaster.set_bot_engine(_bot_engine)
     _bot_task = asyncio.create_task(_bot_engine.start())
 
-    return {"status": "started", "mode": req.trading_mode, "paper": req.paper_trading}
+    return {
+        "status": "started",
+        "mode": config.trading_mode,
+        "execution_mode": config.execution_mode,
+        "primary_exchange": config.primary_exchange,
+        "paper": config.paper_trading,
+    }
+
+
+@app.post("/api/bot/test-telegram")
+async def bot_test_telegram(_user: TokenData = Depends(get_current_user)):
+    """텔레그램 알림 설정을 테스트합니다."""
+    from backend.bot.telegram_notifier import TelegramNotifier
+
+    notifier = TelegramNotifier.from_env()
+    if notifier is None:
+        raise HTTPException(400, "Telegram is not configured")
+    try:
+        await notifier.status("Telegram alert test")
+    finally:
+        await notifier.close()
+    return {"status": "sent"}
 
 
 @app.post("/api/bot/stop")
