@@ -390,6 +390,13 @@ class BotEngine:
                 spread_pct=signal.divergence_pct,
             )
             if trade:
+                if self.trade_recorder:
+                    db_id = await self.trade_recorder.record_open(
+                        trade,
+                        signal_mode=self.config.trading_mode,
+                    )
+                    if db_id:
+                        self._trade_db_ids[trade.trade_id] = db_id
                 if self.telegram:
                     await self.telegram.trade_opened(trade, self.execution_mode)
             return
@@ -442,6 +449,20 @@ class BotEngine:
             trade = self.position_manager.close_virtual_pair(trade_id, reason.value)
             if trade:
                 self.risk_manager.on_trade_closed(trade_id, trade.net_pnl_usd)
+                db_id = self._trade_db_ids.pop(trade_id, None)
+                if db_id and self.trade_recorder:
+                    await self.trade_recorder.record_close(
+                        db_id,
+                        trade,
+                        reason.value,
+                        open_positions=len(self.position_manager.open_trades),
+                    )
+                elif self.trade_recorder:
+                    await self.trade_recorder.record_full(
+                        trade,
+                        exit_reason=reason.value,
+                        signal_mode=self.config.trading_mode,
+                    )
                 if self.telegram:
                     await self.telegram.trade_closed(trade, reason.value, message)
             return
@@ -459,7 +480,12 @@ class BotEngine:
             # DB에 청산 기록
             db_id = self._trade_db_ids.pop(trade_id, None)
             if db_id and self.trade_recorder:
-                await self.trade_recorder.record_close(db_id, trade, reason.value)
+                await self.trade_recorder.record_close(
+                    db_id,
+                    trade,
+                    reason.value,
+                    open_positions=len(self.position_manager.open_trades),
+                )
             if self.telegram:
                 await self.telegram.notify_exit(
                     trade_id=trade_id,

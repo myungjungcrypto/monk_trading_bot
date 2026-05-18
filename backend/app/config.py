@@ -151,20 +151,25 @@ async def get_trade_summary(
     _user: TokenData = Depends(get_current_user),
 ):
     """거래 요약 통계를 반환합니다."""
-    result = await db.execute(select(Trade).where(Trade.closed_at.isnot(None)))
-    closed_trades = result.scalars().all()
+    result = await db.execute(select(Trade))
+    trades = result.scalars().all()
+    closed_trades = [t for t in trades if t.closed_at is not None]
 
     total_pnl = sum(t.net_pnl_usd or 0 for t in closed_trades)
-    total_trades = len(closed_trades)
+    total_trades = len(trades)
+    closed_count = len(closed_trades)
+    open_count = total_trades - closed_count
     wins = sum(1 for t in closed_trades if (t.net_pnl_usd or 0) > 0)
     losses = sum(1 for t in closed_trades if (t.net_pnl_usd or 0) < 0)
 
     return {
         "total_trades": total_trades,
+        "closed_trades": closed_count,
+        "open_trades": open_count,
         "total_pnl_usd": round(total_pnl, 2),
         "wins": wins,
         "losses": losses,
-        "win_rate": round(wins / total_trades * 100, 1) if total_trades > 0 else 0,
+        "win_rate": round(wins / closed_count * 100, 1) if closed_count > 0 else 0,
     }
 
 

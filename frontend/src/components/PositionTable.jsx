@@ -21,40 +21,46 @@ export default function PositionTable({ trades }) {
             </tr>
           </thead>
           <tbody>
-            {trades.map((t) => (
-              <tr key={t.id}>
-                <td style={styles.td}>{t.id}</td>
-                <td style={styles.td}>{t.exchange}</td>
-                <td style={styles.td}>
-                  <span
+            {trades.map((t) => {
+              const isOpen = !t.closed_at;
+              return (
+                <tr key={t.id}>
+                  <td style={styles.td}>{t.id}</td>
+                  <td style={styles.td}>{t.exchange}</td>
+                  <td style={styles.td}>
+                    <span
+                      style={{
+                        color: t.direction?.includes("LONG_BTC")
+                          ? "#22c55e"
+                          : "#ef4444",
+                      }}
+                    >
+                      {t.direction}
+                    </span>
+                  </td>
+                  <td style={styles.td}>${t.size_usd}</td>
+                  <td style={styles.td}>{t.zscore_entry?.toFixed(2)}</td>
+                  <td
                     style={{
-                      color: t.direction?.includes("LONG_BTC")
-                        ? "#22c55e"
-                        : "#ef4444",
+                      ...styles.td,
+                      color: isOpen
+                        ? "#f59e0b"
+                        : (t.net_pnl_usd || 0) >= 0
+                          ? "#22c55e"
+                          : "#ef4444",
                     }}
                   >
-                    {t.direction}
-                  </span>
-                </td>
-                <td style={styles.td}>${t.size_usd}</td>
-                <td style={styles.td}>{t.zscore_entry?.toFixed(2)}</td>
-                <td
-                  style={{
-                    ...styles.td,
-                    color:
-                      (t.net_pnl_usd || 0) >= 0 ? "#22c55e" : "#ef4444",
-                  }}
-                >
-                  ${(t.net_pnl_usd || 0).toFixed(2)}
-                </td>
-                <td style={styles.td}>{t.exit_reason || "-"}</td>
-                <td style={styles.td}>
-                  {t.opened_at
-                    ? new Date(t.opened_at).toLocaleString()
-                    : "-"}
-                </td>
-              </tr>
-            ))}
+                    {isOpen ? "OPEN" : `$${(t.net_pnl_usd || 0).toFixed(2)}`}
+                  </td>
+                  <td style={styles.td}>{isOpen ? "OPEN" : t.exit_reason || "-"}</td>
+                  <td style={styles.td}>
+                    {t.opened_at
+                      ? new Date(t.opened_at).toLocaleString()
+                      : "-"}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>

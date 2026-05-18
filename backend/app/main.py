@@ -173,6 +173,11 @@ def _mode_from_request(req: BotStartRequest, configs: Dict[str, Dict[str, Any]])
     return str(mode_cfg.get("value") or os.getenv("TRADING_MODE", "swing"))
 
 
+def _saved_mode(configs: Dict[str, Dict[str, Any]]) -> str:
+    mode_cfg = configs.get("mode", {})
+    return str(mode_cfg.get("value") or "").strip()
+
+
 def _apply_attrs(obj, values: Dict[str, Any], allowed: set[str]) -> None:
     for key, value in values.items():
         if key in allowed and value is not None:
@@ -189,6 +194,15 @@ def _build_runtime_config(req: BotStartRequest, configs: Dict[str, Dict[str, Any
     from backend.bot.risk_manager import RiskConfig
 
     trading_mode = _mode_from_request(req, configs)
+    saved_mode = _saved_mode(configs)
+    use_saved_mode_params = not (req.trading_mode and saved_mode and saved_mode != trading_mode)
+    if not use_saved_mode_params:
+        logger.info(
+            "Ignoring saved signal/exit config for requested mode=%s because saved mode=%s",
+            trading_mode,
+            saved_mode,
+        )
+
     primary_exchange = (
         req.primary_exchange
         or configs.get("execution", {}).get("primary_exchange")
@@ -200,13 +214,15 @@ def _build_runtime_config(req: BotStartRequest, configs: Dict[str, Dict[str, Any
         or os.getenv("EXECUTION_MODE", EXECUTION_ALERT_ONLY)
     )
 
+    signal_db = configs.get("signal", {}) if use_saved_mode_params else {}
+    exit_cfg = configs.get("exit", {}) if use_saved_mode_params else {}
+
     signal_cfg = MultiTFConfig.from_mode(trading_mode)
     _apply_attrs(
         signal_cfg,
-        configs.get("signal", {}),
+        signal_db,
         {"z_window_5m", "entry_zscore", "max_zscore", "peak_revert_ratio"},
     )
-    signal_db = configs.get("signal", {})
     if "divergence_threshold_pct" in signal_db:
         db_div = float(signal_db["divergence_threshold_pct"])
         if db_div < 0.1:
@@ -216,7 +232,6 @@ def _build_runtime_config(req: BotStartRequest, configs: Dict[str, Dict[str, Any
         if db_lb >= 6:
             signal_cfg.divergence_lookback = db_lb
 
-    exit_cfg = configs.get("exit", {})
     if "zscore_revert_threshold" in exit_cfg:
         signal_cfg.zscore_revert_threshold = exit_cfg["zscore_revert_threshold"]
 

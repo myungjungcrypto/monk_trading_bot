@@ -14,6 +14,7 @@ alembic>=1.13.0
 # HTTP / Async
 aiohttp>=3.9.0
 requests>=2.31.0
+websockets>=12.0
 
 # Optional: required only when LIGHTER_LIVE_TRADING_ENABLED=true
 # lighter-sdk

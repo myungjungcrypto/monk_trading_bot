@@ -3,6 +3,7 @@ export default function TradeLog({ summary }) {
 
   const cards = [
     { label: "Total Trades", value: summary.total_trades, color: "#fff" },
+    { label: "Open", value: summary.open_trades ?? 0, color: "#f59e0b" },
     {
       label: "Total PNL",
       value: `$${summary.total_pnl_usd?.toFixed(2)}`,

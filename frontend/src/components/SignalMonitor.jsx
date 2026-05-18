@@ -1,8 +1,11 @@
 export default function SignalMonitor({ status }) {
   if (!status) return null;
 
-  const zscore = status.zscore_current || 0;
-  const spread = status.spread_current || 0;
+  const signal = status.signal || {};
+  const positions = status.positions || {};
+  const zscore = signal.zscore_5m || signal.zscore_current || status.zscore_current || 0;
+  const spread = signal.spread_5m_pct || signal.spread_current || status.spread_current || 0;
+  const openPnl = positions.total_pnl_usd || 0;
 
   // Z-score 게이지 (-4 ~ +4 범위)
   const pct = Math.min(Math.max((zscore + 4) / 8, 0), 1) * 100;
@@ -37,7 +40,7 @@ export default function SignalMonitor({ status }) {
 
       <div style={styles.row}>
         <span style={styles.label}>Spread</span>
-        <span style={styles.value}>{(spread * 100).toFixed(4)}%</span>
+        <span style={styles.value}>{spread.toFixed(4)}%</span>
       </div>
 
       <div style={styles.row}>
@@ -49,6 +52,18 @@ export default function SignalMonitor({ status }) {
           }}
         >
           {status.running ? "ACTIVE" : "STOPPED"}
+        </span>
+      </div>
+
+      <div style={styles.row}>
+        <span style={styles.label}>Open PNL</span>
+        <span
+          style={{
+            ...styles.value,
+            color: openPnl >= 0 ? "#22c55e" : "#ef4444",
+          }}
+        >
+          ${openPnl.toFixed(2)}
         </span>
       </div>
 

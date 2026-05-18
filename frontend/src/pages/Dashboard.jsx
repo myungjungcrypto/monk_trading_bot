@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   getBotStatus,
@@ -25,26 +25,29 @@ export default function Dashboard() {
   const wsRef = useRef(null);
   const navigate = useNavigate();
 
-  // 초기 데이터 로드
-  useEffect(() => {
-    const load = async () => {
-      try {
-        const [statusRes, tradesRes, summaryRes, pnlRes] = await Promise.all([
-          getBotStatus(),
-          getTrades(20),
-          getTradeSummary(),
-          getPnlHistory(100),
-        ]);
-        setStatus(statusRes.data);
-        setTrades(tradesRes.data);
-        setSummary(summaryRes.data);
-        setPnlData(pnlRes.data);
-      } catch {
-        // 401은 interceptor에서 처리
-      }
-    };
-    load();
+  const loadRuntimeData = useCallback(async () => {
+    try {
+      const [statusRes, tradesRes, summaryRes, pnlRes] = await Promise.all([
+        getBotStatus(),
+        getTrades(50),
+        getTradeSummary(),
+        getPnlHistory(200),
+      ]);
+      setStatus(statusRes.data);
+      setTrades(tradesRes.data);
+      setSummary(summaryRes.data);
+      setPnlData(pnlRes.data);
+    } catch {
+      // 401은 interceptor에서 처리
+    }
   }, []);
+
+  // 초기 데이터 로드 + DB 기반 거래/PNL 주기 갱신
+  useEffect(() => {
+    loadRuntimeData();
+    const refreshId = setInterval(loadRuntimeData, 15000);
+    return () => clearInterval(refreshId);
+  }, [loadRuntimeData]);
 
   // WebSocket 실시간 데이터
   useEffect(() => {
@@ -63,8 +66,7 @@ export default function Dashboard() {
     setLoading(true);
     try {
       await startBot(mode);
-      const res = await getBotStatus();
-      setStatus(res.data);
+      await loadRuntimeData();
     } catch (err) {
       alert(err.response?.data?.detail || "Start failed");
     }
@@ -75,8 +77,7 @@ export default function Dashboard() {
     setLoading(true);
     try {
       await stopBot();
-      const res = await getBotStatus();
-      setStatus(res.data);
+      await loadRuntimeData();
     } catch (err) {
       alert(err.response?.data?.detail || "Stop failed");
     }
