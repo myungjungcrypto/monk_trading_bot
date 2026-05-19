@@ -172,13 +172,16 @@ class MultiTimeframeSignalEngine:
     "z_window_5m": 30,
     "entry_zscore": 1.5,
     "max_zscore": 3.0,
-    "divergence_threshold_pct": 1.0,
+    "divergence_threshold_pct": 0.3,
+    "divergence_lookback": 6,
     "peak_revert_ratio": 0.95
   },
   "exit": {
     "take_profit_pct": 0.4,
     "stop_loss_pct": -1.5,
     "zscore_revert_threshold": 0.3,
+    "min_hold_minutes": 60,
+    "zscore_exit_min_pnl_pct": 0.05,
     "max_hold_hours": 2
   },
   "expected_trades_per_day": "20~50회"
@@ -195,15 +198,18 @@ class MultiTimeframeSignalEngine:
     "entry_zscore": 2.0,
     "max_zscore": 3.5,
     "divergence_threshold_pct": 1.5,
+    "divergence_lookback": 12,
     "peak_revert_ratio": 0.90
   },
   "exit": {
     "take_profit_pct": 0.8,
     "stop_loss_pct": -3.0,
-    "zscore_revert_threshold": 0.5,
+    "zscore_revert_threshold": 1.5,
+    "min_hold_minutes": 120,
+    "zscore_exit_min_pnl_pct": 0.05,
     "max_hold_hours": 12
   },
-  "expected_trades_per_day": "5~15회"
+  "expected_trades_per_day": "0.3~0.5회"
 }
 ```
 
@@ -217,17 +223,96 @@ class MultiTimeframeSignalEngine:
     "entry_zscore": 2.5,
     "max_zscore": 4.0,
     "divergence_threshold_pct": 2.0,
+    "divergence_lookback": 24,
     "peak_revert_ratio": 0.85
   },
   "exit": {
     "take_profit_pct": 2.0,
     "stop_loss_pct": -5.0,
     "zscore_revert_threshold": 0.8,
+    "min_hold_minutes": 180,
+    "zscore_exit_min_pnl_pct": 0.1,
     "max_hold_hours": 48
   },
   "expected_trades_per_day": "1~3회"
 }
 ```
+
+### 2026-05-19 Binance 6개월 백테스트 기준값
+
+> 기준 데이터: Binance Futures `BTCUSDT` / `ETHUSDT` 1분봉  
+> 기간: 2025-11-19 ~ 2026-05-19 (181일), warmup 48시간  
+> 실행 가정: Lighter, 레그당 $500, 총 노출 $1000, 3x 레버리지, taker fee 0bp, slippage 1bp  
+> 백테스트 모드: alert-only와 맞추기 위해 averaging / size reduction 비활성화
+
+권장 운영값:
+
+```json
+{
+  "mode": "swing",
+  "signal": {
+    "z_window_5m": 50,
+    "entry_zscore": 2.0,
+    "max_zscore": 3.5,
+    "divergence_threshold_pct": 1.5,
+    "divergence_lookback": 12,
+    "peak_revert_ratio": 0.90
+  },
+  "exit": {
+    "take_profit_pct": 0.8,
+    "stop_loss_pct": -3.0,
+    "zscore_revert_threshold": 1.5,
+    "min_hold_minutes": 120,
+    "max_hold_hours": 12,
+    "zscore_exit_min_pnl_pct": 0.05
+  },
+  "costs": {
+    "taker_fee_bps": 0,
+    "slippage_bps": 1
+  }
+}
+```
+
+정확 엔진 검증 결과:
+
+| 항목 | 값 |
+|------|----|
+| 총 거래 수 | 77 |
+| 승률 | 94.8% |
+| 거래 빈도 | 0.4회/일 |
+| 순손익 | 약 +$305.07 |
+| Profit Factor | 10.53 |
+| 평균 보유 | 131.2분 |
+| Max Drawdown | -27.20% |
+| Sharpe | 5.10 |
+| Calmar | 4.64 |
+| 청산 사유 | ZSCORE 46 · TP 27 · TIMEOUT 4 |
+
+APR 환산:
+
+| 기준 자본 | 계산 | APR |
+|-----------|------|-----|
+| 총 노출 기준 | $305.07 / $1000 × 365 / 181 | 약 61.5% |
+| 레그당 크기 기준 | $305.07 / $500 × 365 / 181 | 약 123.0% |
+| 3x 증거금 기준 | $305.07 / ($1000 / 3) × 365 / 181 | 약 184.6% |
+
+운영 판단은 총 노출 기준 APR을 기본값으로 본다. 증거금 기준 APR은 레버리지 효과를 보여주지만 funding, 미체결, 청산 버퍼, 실시간 슬리피지 확대를 반영하지 못한다.
+
+빠른 5분봉 스윕 요약:
+
+| divergence | zscore revert | min hold | min net pnl | trades | PnL | Sharpe | PF |
+|------------|---------------|----------|-------------|--------|-----|--------|----|
+| 1.5 | 1.5 | 120m | 0.05% | 12 | +$33.39 | 2.82 | 7.71 |
+| 0.8 | 1.2 | 180m | 0.10% | 36 | +$26.46 | 1.40 | 1.51 |
+| 0.8 | 1.5 | 120m | 0.05% | 36 | +$23.22 | 1.30 | 1.50 |
+| 0.3 | 1.5 | 120~180m | 0.05% | 155~159 | 손실 | 음수 | < 1 |
+| 0.03 | 1.5 | 120m | 0~0.2% | 223~257 | 손실 | 음수 | < 1 |
+
+해석:
+- `divergence_threshold_pct`가 0.3% 이하이면 거래 수는 늘지만 1bp 슬리피지만 반영해도 손익이 무너진다.
+- Binance 6개월 기준으로는 `divergence_threshold_pct=1.5`가 가장 보수적이고 품질이 좋다.
+- `zscore_exit_min_pnl_pct=0`은 너무 약하다. 최소 0.05% 순수익 버퍼를 둔다.
+- `min_hold_minutes=120`은 강제 청산 시간이 아니라 Z-score 수렴 청산을 허용하기 전 최소 보유 시간이다. 강제 시간 청산은 `max_hold_hours=12`다.
 
 ---
 
