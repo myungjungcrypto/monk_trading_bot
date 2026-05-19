@@ -5,7 +5,7 @@ Tick Generator — 1분봉 OHLCV → 합성 틱 변환.
 """
 
 from dataclasses import dataclass
-from typing import Iterator
+from typing import Iterator, Optional
 
 import pandas as pd
 
@@ -48,6 +48,31 @@ def candle_to_ticks(
         ]
 
 
+def _iter_candle_ticks(df: pd.DataFrame, symbol: str) -> Iterator[SyntheticTick]:
+    """DataFrame을 전체 tick list로 만들지 않고 candle별 synthetic tick을 스트리밍합니다."""
+    for row in df.itertuples(index=False):
+        ts = int(row.timestamp_ms)
+        o, h, l, c = row.open, row.high, row.low, row.close
+
+        if c >= o:
+            yield SyntheticTick(symbol, o, ts)
+            yield SyntheticTick(symbol, l, ts + 15_000)
+            yield SyntheticTick(symbol, h, ts + 30_000)
+            yield SyntheticTick(symbol, c, ts + 55_000)
+        else:
+            yield SyntheticTick(symbol, o, ts)
+            yield SyntheticTick(symbol, h, ts + 15_000)
+            yield SyntheticTick(symbol, l, ts + 30_000)
+            yield SyntheticTick(symbol, c, ts + 55_000)
+
+
+def _next_or_none(iterator: Iterator[SyntheticTick]) -> Optional[SyntheticTick]:
+    try:
+        return next(iterator)
+    except StopIteration:
+        return None
+
+
 def generate_interleaved_ticks(
     btc_df: pd.DataFrame,
     eth_df: pd.DataFrame,
@@ -58,27 +83,17 @@ def generate_interleaved_ticks(
     Yields:
         SyntheticTick (시간순 정렬)
     """
-    btc_ticks: list[SyntheticTick] = []
-    eth_ticks: list[SyntheticTick] = []
+    btc_iter = _iter_candle_ticks(btc_df, "BTC")
+    eth_iter = _iter_candle_ticks(eth_df, "ETH")
+    btc_tick = _next_or_none(btc_iter)
+    eth_tick = _next_or_none(eth_iter)
 
-    for _, row in btc_df.iterrows():
-        btc_ticks.extend(candle_to_ticks(row, "BTC"))
-    for _, row in eth_df.iterrows():
-        eth_ticks.extend(candle_to_ticks(row, "ETH"))
-
-    # 두 리스트를 시간순 머지 (merge sort)
-    i, j = 0, 0
-    while i < len(btc_ticks) and j < len(eth_ticks):
-        if btc_ticks[i].timestamp_ms <= eth_ticks[j].timestamp_ms:
-            yield btc_ticks[i]
-            i += 1
+    while btc_tick is not None or eth_tick is not None:
+        if eth_tick is None or (
+            btc_tick is not None and btc_tick.timestamp_ms <= eth_tick.timestamp_ms
+        ):
+            yield btc_tick
+            btc_tick = _next_or_none(btc_iter)
         else:
-            yield eth_ticks[j]
-            j += 1
-
-    while i < len(btc_ticks):
-        yield btc_ticks[i]
-        i += 1
-    while j < len(eth_ticks):
-        yield eth_ticks[j]
-        j += 1
+            yield eth_tick
+            eth_tick = _next_or_none(eth_iter)

@@ -252,9 +252,9 @@ class RiskManager:
 
     # ── 진입 허용 체크 ────────────────────────────────────────
 
-    def can_open_trade(self, current_open_count: int) -> bool:
+    def can_open_trade(self, current_open_count: int, current_time: Optional[float] = None) -> bool:
         """새 트레이드를 열 수 있는지 확인합니다."""
-        self._check_daily_reset()
+        self._check_daily_reset(current_time=current_time)
 
         if current_open_count >= self.config.max_open_trades:
             logger.info("Max open trades reached: %d", current_open_count)

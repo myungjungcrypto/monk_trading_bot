@@ -235,7 +235,7 @@ def _build_runtime_config(req: BotStartRequest, configs: Dict[str, Dict[str, Any
     )
     if "divergence_threshold_pct" in signal_db:
         db_div = float(signal_db["divergence_threshold_pct"])
-        if db_div < 0.1:
+        if db_div > 0:
             signal_cfg.divergence_threshold_pct = db_div
     if "divergence_lookback" in signal_db:
         db_lb = int(signal_db["divergence_lookback"])

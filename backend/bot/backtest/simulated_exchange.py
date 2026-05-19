@@ -30,7 +30,7 @@ class FeeConfig:
 
     @classmethod
     def lighter(cls) -> "FeeConfig":
-        return cls(taker_fee_pct=0.0, slippage_pct=0.005)
+        return cls(taker_fee_pct=0.0, slippage_pct=0.01)
 
     @classmethod
     def pacifica(cls) -> "FeeConfig":

@@ -162,7 +162,10 @@ class BacktestEngine:
 
             # 진입 판단
             if not self.position_manager.has_open_position and signal.should_enter:
-                if self.risk_manager.can_open_trade(self.position_manager.open_trade_count):
+                if self.risk_manager.can_open_trade(
+                    self.position_manager.open_trade_count,
+                    current_time=self.clock.now,
+                ):
                     direction = (
                         PairDirection.LONG_BTC_SHORT_ETH
                         if signal.direction == SignalDirection.LONG_BTC_SHORT_ETH
@@ -196,12 +199,17 @@ class BacktestEngine:
                         )
                         if closed:
                             closed.closed_at = self.clock.now
-                            # 수수료 계산: 4-leg (진입 2 + 청산 2)
+                            # 수수료 계산: 4-leg fee + 청산 2-leg slippage.
+                            # 진입 slippage는 SimulatedExchange의 entry fill에 이미 반영됩니다.
                             fee_per_leg = (
                                 self.config.position_size_usd
                                 * self.exchange.fee_config.taker_fee_pct / 100.0
                             )
-                            closed.total_fees_usd = fee_per_leg * 4
+                            close_slippage_per_leg = (
+                                self.config.position_size_usd
+                                * self.exchange.fee_config.slippage_pct / 100.0
+                            )
+                            closed.total_fees_usd = fee_per_leg * 4 + close_slippage_per_leg * 2
                             self.result.add_trade(closed, decision.reason.value)
                             self.risk_manager.on_trade_closed(
                                 trade_id, closed.net_pnl_usd,
