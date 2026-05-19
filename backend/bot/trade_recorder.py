@@ -37,6 +37,7 @@ class TradeRecorder:
                     spread_entry=trade.spread_at_entry,
                     signal_mode=signal_mode,
                     opened_at=datetime.fromtimestamp(trade.opened_at, tz=timezone.utc),
+                    fees_usd=trade.total_fees_usd,
                 )
                 db.add(db_trade)
                 await db.commit()

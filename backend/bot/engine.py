@@ -66,6 +66,10 @@ class BotConfig:
     # 리스크 설정
     risk_config: Optional[RiskConfig] = None
 
+    # Alert/Paper 가상 체결 비용 추정 (1bp = 0.01%)
+    taker_fee_bps: float = 0.0
+    slippage_bps: float = 1.0
+
     # 포지션 모니터링 간격 (초)
     position_check_interval: int = 10
 
@@ -388,6 +392,8 @@ class BotEngine:
                 eth_price=eth_price,
                 zscore=signal.zscore_5m,
                 spread_pct=signal.divergence_pct,
+                taker_fee_bps=self.config.taker_fee_bps,
+                slippage_bps=self.config.slippage_bps,
             )
             if trade:
                 if self.trade_recorder:
@@ -543,6 +549,10 @@ class BotEngine:
             "execution_mode": self.execution_mode,
             "primary_exchange": self._primary_exchange.name if self._primary_exchange else None,
             "telegram_enabled": bool(self.telegram and self.telegram.enabled),
+            "costs": {
+                "taker_fee_bps": self.config.taker_fee_bps,
+                "slippage_bps": self.config.slippage_bps,
+            },
             "signal": self.signal_engine.get_status(),
             "positions": self.position_manager.get_summary(),
             "risk": self.risk_manager.get_status(),

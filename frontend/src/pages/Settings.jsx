@@ -18,7 +18,7 @@ const MODE_DEFAULTS = {
       zscore_revert_threshold: 0.3,
       min_hold_minutes: 5,
       max_hold_hours: 2,
-      zscore_exit_min_pnl_pct: 0.0,
+      zscore_exit_min_pnl_pct: 0.05,
     },
   },
   swing: {
@@ -36,7 +36,7 @@ const MODE_DEFAULTS = {
       zscore_revert_threshold: 1.5,
       max_hold_hours: 12,
       min_hold_minutes: 120,
-      zscore_exit_min_pnl_pct: 0.0,
+      zscore_exit_min_pnl_pct: 0.05,
     },
   },
   position: {
@@ -54,10 +54,49 @@ const MODE_DEFAULTS = {
       zscore_revert_threshold: 1.5,
       min_hold_minutes: 240,
       max_hold_hours: 48,
-      zscore_exit_min_pnl_pct: 0.0,
+      zscore_exit_min_pnl_pct: 0.05,
     },
   },
 };
+
+const EXCHANGE_DEFAULTS = {
+  pacifica: {
+    enabled: true,
+    position_size_usd: 500,
+    leverage: 3,
+    taker_fee_bps: 2,
+    slippage_bps: 1,
+  },
+  extended: {
+    enabled: true,
+    position_size_usd: 500,
+    leverage: 3,
+    taker_fee_bps: 2,
+    slippage_bps: 1,
+  },
+  lighter: {
+    enabled: true,
+    position_size_usd: 500,
+    leverage: 3,
+    taker_fee_bps: 0,
+    slippage_bps: 1,
+  },
+  backpack: {
+    enabled: true,
+    position_size_usd: 500,
+    leverage: 3,
+    taker_fee_bps: 6,
+    slippage_bps: 1,
+  },
+};
+
+const mergeExchangeDefaults = (saved = {}) =>
+  Object.fromEntries(
+    Object.entries(EXCHANGE_DEFAULTS).map(([name, defaults]) => [
+      name,
+      { ...defaults, ...(saved[name] || {}) },
+    ])
+  );
 
 export default function Settings() {
   const [mode, setMode] = useState("swing");
@@ -67,12 +106,7 @@ export default function Settings() {
   });
   const [signal, setSignal] = useState(MODE_DEFAULTS.swing.signal);
   const [exit, setExit] = useState(MODE_DEFAULTS.swing.exit);
-  const [exchanges, setExchanges] = useState({
-    pacifica: { enabled: true, position_size_usd: 500, leverage: 3 },
-    extended: { enabled: true, position_size_usd: 500, leverage: 3 },
-    lighter: { enabled: true, position_size_usd: 500, leverage: 3 },
-    backpack: { enabled: true, position_size_usd: 500, leverage: 3 },
-  });
+  const [exchanges, setExchanges] = useState(mergeExchangeDefaults());
   const [risk, setRisk] = useState({
     max_open_trades: 3,
     daily_loss_limit_usd: -200,
@@ -92,7 +126,7 @@ export default function Settings() {
         if (configs.execution) setExecution(configs.execution);
         if (configs.signal) setSignal(configs.signal);
         if (configs.exit) setExit(configs.exit);
-        if (configs.exchanges) setExchanges(configs.exchanges);
+        if (configs.exchanges) setExchanges(mergeExchangeDefaults(configs.exchanges));
         if (configs.risk) setRisk(configs.risk);
       } catch {
         // 첫 실행 시 설정 없음
@@ -276,6 +310,36 @@ export default function Settings() {
                   style={styles.miniInput}
                 />
               </label>
+              <label style={styles.miniLabel}>
+                Fee bp
+                <input
+                  type="number"
+                  step="any"
+                  value={cfg.taker_fee_bps}
+                  onChange={(e) =>
+                    setExchanges({
+                      ...exchanges,
+                      [name]: { ...cfg, taker_fee_bps: parseFloat(e.target.value) || 0 },
+                    })
+                  }
+                  style={styles.miniInput}
+                />
+              </label>
+              <label style={styles.miniLabel}>
+                Slip bp
+                <input
+                  type="number"
+                  step="any"
+                  value={cfg.slippage_bps}
+                  onChange={(e) =>
+                    setExchanges({
+                      ...exchanges,
+                      [name]: { ...cfg, slippage_bps: parseFloat(e.target.value) || 0 },
+                    })
+                  }
+                  style={styles.miniInput}
+                />
+              </label>
             </div>
           </div>
         ))}
@@ -380,6 +444,8 @@ const styles = {
     alignItems: "center",
     padding: "8px 0",
     borderBottom: "1px solid #222",
+    gap: "12px",
+    flexWrap: "wrap",
   },
   checkLabel: {
     display: "flex",
@@ -394,6 +460,8 @@ const styles = {
   exchangeFields: {
     display: "flex",
     gap: "12px",
+    flexWrap: "wrap",
+    justifyContent: "flex-end",
   },
   miniLabel: {
     color: "#888",

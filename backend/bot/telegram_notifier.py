@@ -189,6 +189,7 @@ class TelegramNotifier:
                 f"ETH entry: {trade.eth_leg.entry_price:.4f}",
                 f"zscore_entry: {trade.zscore_at_entry:.3f}",
                 f"spread_entry: {trade.spread_at_entry:.4f}%",
+                f"estimated_costs: ${trade.total_fees_usd:.4f}",
             ])
         )
 
@@ -202,7 +203,7 @@ class TelegramNotifier:
             f"reason: {reason}",
             f"direction: {trade.direction.value}",
             f"PNL: ${trade.net_pnl_usd:.2f} ({trade.pnl_pct:.3f}%)",
-            f"fees: ${trade.total_fees_usd:.4f}",
+            f"costs: ${trade.total_fees_usd:.4f}",
             f"hold: {hold_minutes:.1f}m",
             f"BTC: {trade.btc_leg.entry_price:.2f} -> {trade.btc_leg.current_price:.2f}",
             f"ETH: {trade.eth_leg.entry_price:.4f} -> {trade.eth_leg.current_price:.4f}",

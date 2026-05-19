@@ -106,6 +106,26 @@ class TestPositionManagerState:
         assert updated.btc_leg.unrealized_pnl > 0
         assert updated.eth_leg.unrealized_pnl > 0
 
+    def test_virtual_pair_applies_round_trip_costs(self):
+        pm = PositionManager()
+        trade = pm.open_virtual_pair(
+            exchange_name="virtual",
+            direction=PairDirection.SHORT_BTC_LONG_ETH,
+            size_usd=500,
+            btc_price=100000,
+            eth_price=2000,
+            taker_fee_bps=0,
+            slippage_bps=1,
+        )
+
+        assert trade.total_fees_usd == pytest.approx(0.20)
+        assert trade.net_pnl_usd == pytest.approx(-0.20)
+
+        pm.update_virtual_positions("virtual", btc_price=99000, eth_price=2020)
+        updated = pm.open_trades[trade.trade_id]
+        assert updated.total_pnl_usd == pytest.approx(10.0)
+        assert updated.net_pnl_usd == pytest.approx(9.80)
+
     def test_close_virtual_pair_moves_trade_to_closed_state(self):
         pm = PositionManager()
         trade = pm.open_virtual_pair(

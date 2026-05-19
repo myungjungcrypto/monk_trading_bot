@@ -258,6 +258,8 @@ class PositionManager:
         eth_price: float,
         zscore: float = 0.0,
         spread_pct: float = 0.0,
+        taker_fee_bps: float = 0.0,
+        slippage_bps: float = 0.0,
     ) -> Optional[PairTrade]:
         """
         실주문 없이 페어 포지션을 엽니다.
@@ -302,11 +304,16 @@ class PositionManager:
             opened_at=time.time(),
             zscore_at_entry=zscore,
             spread_at_entry=spread_pct,
+            total_fees_usd=self._estimate_round_trip_cost_usd(
+                size_usd,
+                taker_fee_bps=taker_fee_bps,
+                slippage_bps=slippage_bps,
+            ),
         )
         self._open_trades[trade_id] = trade
         logger.info(
-            "Virtual pair opened: %s | %s | BTC@%.2f ETH@%.4f | Z=%.2f",
-            trade_id, direction.value, btc_price, eth_price, zscore,
+            "Virtual pair opened: %s | %s | BTC@%.2f ETH@%.4f | Z=%.2f | costs=$%.4f",
+            trade_id, direction.value, btc_price, eth_price, zscore, trade.total_fees_usd,
         )
         return trade
 
@@ -347,6 +354,16 @@ class PositionManager:
             leg.unrealized_pnl = (price - leg.entry_price) * leg.quantity
         else:
             leg.unrealized_pnl = (leg.entry_price - price) * leg.quantity
+
+    @staticmethod
+    def _estimate_round_trip_cost_usd(
+        size_usd_per_leg: float,
+        taker_fee_bps: float = 0.0,
+        slippage_bps: float = 0.0,
+    ) -> float:
+        """진입 2레그 + 청산 2레그의 예상 수수료/슬리피지 비용."""
+        total_cost_bps = max(taker_fee_bps, 0.0) + max(slippage_bps, 0.0)
+        return size_usd_per_leg * 4 * total_cost_bps / 10_000.0
 
     # ── 포지션 업데이트 ───────────────────────────────────────
 

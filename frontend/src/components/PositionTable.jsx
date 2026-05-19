@@ -16,6 +16,7 @@ export default function PositionTable({ trades }) {
               <th style={styles.th}>Size</th>
               <th style={styles.th}>Z-Score</th>
               <th style={styles.th}>PNL</th>
+              <th style={styles.th}>Costs</th>
               <th style={styles.th}>Exit</th>
               <th style={styles.th}>Time</th>
             </tr>
@@ -52,6 +53,7 @@ export default function PositionTable({ trades }) {
                   >
                     {isOpen ? "OPEN" : `$${(t.net_pnl_usd || 0).toFixed(2)}`}
                   </td>
+                  <td style={styles.td}>${(t.fees_usd || 0).toFixed(2)}</td>
                   <td style={styles.td}>{isOpen ? "OPEN" : t.exit_reason || "-"}</td>
                   <td style={styles.td}>
                     {t.opened_at

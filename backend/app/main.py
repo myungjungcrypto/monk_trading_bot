@@ -184,6 +184,16 @@ def _apply_attrs(obj, values: Dict[str, Any], allowed: set[str]) -> None:
             setattr(obj, key, value)
 
 
+def _exchange_cost_defaults(name: str) -> Dict[str, float]:
+    defaults = {
+        "lighter": {"taker_fee_bps": 0.0, "slippage_bps": 1.0},
+        "pacifica": {"taker_fee_bps": 2.0, "slippage_bps": 1.0},
+        "extended": {"taker_fee_bps": 2.0, "slippage_bps": 1.0},
+        "backpack": {"taker_fee_bps": 6.0, "slippage_bps": 1.0},
+    }
+    return defaults.get(name, {"taker_fee_bps": 0.0, "slippage_bps": 1.0})
+
+
 def _build_runtime_config(req: BotStartRequest, configs: Dict[str, Dict[str, Any]]):
     from backend.bot.engine import (
         BotConfig,
@@ -265,8 +275,21 @@ def _build_runtime_config(req: BotStartRequest, configs: Dict[str, Dict[str, Any
     )
 
     exchange_cfg = configs.get("exchanges", {}).get(primary_exchange, {})
+    cost_defaults = _exchange_cost_defaults(primary_exchange)
     position_size = float(exchange_cfg.get("position_size_usd", os.getenv("POSITION_SIZE_USD", "500")))
     leverage = int(exchange_cfg.get("leverage", os.getenv("LEVERAGE", "3")))
+    taker_fee_bps = float(
+        exchange_cfg.get(
+            "taker_fee_bps",
+            os.getenv("TAKER_FEE_BPS", str(cost_defaults["taker_fee_bps"])),
+        )
+    )
+    slippage_bps = float(
+        exchange_cfg.get(
+            "slippage_bps",
+            os.getenv("SLIPPAGE_BPS", str(cost_defaults["slippage_bps"])),
+        )
+    )
 
     return BotConfig(
         position_size_usd=position_size,
@@ -277,6 +300,8 @@ def _build_runtime_config(req: BotStartRequest, configs: Dict[str, Dict[str, Any
         trading_mode=trading_mode,
         signal_config=signal_cfg,
         risk_config=risk_base,
+        taker_fee_bps=taker_fee_bps,
+        slippage_bps=slippage_bps,
     )
 
 
@@ -375,6 +400,10 @@ async def bot_start(
         "execution_mode": config.execution_mode,
         "primary_exchange": config.primary_exchange,
         "paper": config.paper_trading,
+        "costs": {
+            "taker_fee_bps": config.taker_fee_bps,
+            "slippage_bps": config.slippage_bps,
+        },
     }
 
 
