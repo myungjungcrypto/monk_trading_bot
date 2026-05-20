@@ -140,3 +140,23 @@ class TestPositionManagerState:
         assert closed is not None
         assert not closed.is_open
         assert pm.open_trade_count == 0
+
+    def test_restore_pair_recreates_open_trade_state(self):
+        pm = PositionManager()
+        trade = pm.restore_pair(
+            trade_id="db_1",
+            exchange_name="virtual",
+            direction=PairDirection.LONG_BTC_SHORT_ETH,
+            size_usd_per_leg=500,
+            btc_entry=100000,
+            eth_entry=2000,
+            opened_at=time.time() - 3600,
+            total_fees_usd=0.2,
+            btc_current=101000,
+            eth_current=1980,
+        )
+
+        assert trade is not None
+        assert pm.has_open_position
+        assert pm.open_trades["db_1"].net_pnl_usd == pytest.approx(9.8)
+        assert pm.open_trades["db_1"].pnl_pct == pytest.approx(0.98)

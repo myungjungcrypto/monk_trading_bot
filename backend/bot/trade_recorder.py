@@ -6,7 +6,7 @@ Trade Recorder — 거래 기록을 DB에 자동 저장.
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +22,20 @@ class TradeRecorder:
 
     def __init__(self, session_factory):
         self._session_factory = session_factory
+
+    async def fetch_open_trades(self, exchange: Optional[str] = None) -> List[Trade]:
+        """청산되지 않은 DB 거래를 오래된 순서대로 가져옵니다."""
+        try:
+            async with self._session_factory() as db:
+                query = select(Trade).where(Trade.closed_at.is_(None))
+                if exchange:
+                    query = query.where(Trade.exchange == exchange)
+                query = query.order_by(Trade.opened_at.asc(), Trade.id.asc())
+                result = await db.execute(query)
+                return list(result.scalars().all())
+        except Exception as e:
+            logger.error("Failed to fetch open trades: %s", e)
+            return []
 
     async def record_open(self, trade: PairTrade, signal_mode: str = "scalp") -> Optional[int]:
         """거래 진입 시 DB에 기록합니다. 반환: DB trade ID."""

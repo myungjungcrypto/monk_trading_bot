@@ -10,10 +10,11 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from backend.bot.exchanges.backpack import BackpackExchange
-from backend.bot.exchanges.base import BaseExchange
+from backend.bot.exchanges.base import BaseExchange, PositionSide
 from backend.bot.position_manager import PairDirection, PositionManager
 from backend.bot.price_buffer import PriceBuffer
 from backend.bot.price_hub import PriceHub
@@ -149,6 +150,143 @@ class BotEngine:
     def is_running(self) -> bool:
         return self._running
 
+    # ── 재시작 복구 ───────────────────────────────────────────
+
+    async def _restore_open_trades(self) -> None:
+        """DB/거래소에 남아 있는 열린 포지션을 메모리 상태로 복구합니다."""
+        if self.trade_recorder is None:
+            return
+
+        exchange_name = VIRTUAL_EXCHANGE_NAME if self._uses_virtual_positions else (
+            self._primary_exchange.name if self._primary_exchange else None
+        )
+        if exchange_name is None:
+            return
+
+        db_trades = await self.trade_recorder.fetch_open_trades(exchange=exchange_name)
+        if not db_trades:
+            return
+
+        if self._uses_virtual_positions:
+            restored = self._restore_virtual_trades(db_trades)
+        else:
+            restored = await self._restore_live_trades(db_trades)
+
+        if restored and self.telegram:
+            await self.telegram.status(f"Restored {restored} open trade(s) after restart")
+
+    def _restore_virtual_trades(self, db_trades: List[object]) -> int:
+        restored = 0
+        for db_trade in db_trades:
+            trade = self._restore_trade_from_db(db_trade)
+            if trade:
+                self._trade_db_ids[trade.trade_id] = db_trade.id
+                restored += 1
+        return restored
+
+    async def _restore_live_trades(self, db_trades: List[object]) -> int:
+        if self._primary_exchange is None:
+            return 0
+        if len(db_trades) > 1:
+            logger.warning(
+                "Multiple open live DB trades found (%d); exchange position is aggregate, restoring oldest only",
+                len(db_trades),
+            )
+
+        try:
+            positions = await self._primary_exchange.get_positions()
+        except Exception as e:
+            logger.error("Failed to fetch live positions for restore: %s", e)
+            if self.telegram:
+                await self.telegram.error(f"Failed to restore live position: {e}")
+            return 0
+
+        btc_symbol = self._primary_exchange.perp_symbol("BTC")
+        eth_symbol = self._primary_exchange.perp_symbol("ETH")
+        btc_pos = next((p for p in positions if p.symbol == btc_symbol), None)
+        eth_pos = next((p for p in positions if p.symbol == eth_symbol), None)
+        if btc_pos is None or eth_pos is None:
+            logger.warning("Open DB trade exists but live BTC/ETH positions were not found")
+            if self.telegram:
+                await self.telegram.error("Open DB trade exists, but live BTC/ETH positions were not found")
+            return 0
+
+        db_trade = db_trades[0]
+        direction = PairDirection(db_trade.direction)
+        expected_btc = PositionSide.LONG if direction == PairDirection.LONG_BTC_SHORT_ETH else PositionSide.SHORT
+        expected_eth = PositionSide.SHORT if direction == PairDirection.LONG_BTC_SHORT_ETH else PositionSide.LONG
+        if btc_pos.side != expected_btc or eth_pos.side != expected_eth:
+            logger.warning(
+                "Live position side mismatch on restore: db=%s btc=%s eth=%s",
+                direction.value, btc_pos.side.value, eth_pos.side.value,
+            )
+            if self.telegram:
+                await self.telegram.error("Live position side mismatch on restore; not attaching position")
+            return 0
+
+        trade = self._restore_trade_from_db(
+            db_trade,
+            btc_quantity=btc_pos.size,
+            eth_quantity=eth_pos.size,
+            btc_entry=btc_pos.entry_price or db_trade.btc_entry,
+            eth_entry=eth_pos.entry_price or db_trade.eth_entry,
+            btc_current=btc_pos.mark_price or btc_pos.entry_price,
+            eth_current=eth_pos.mark_price or eth_pos.entry_price,
+        )
+        if not trade:
+            return 0
+        self._trade_db_ids[trade.trade_id] = db_trade.id
+        await self.position_manager.update_positions(self._primary_exchange)
+        return 1
+
+    def _restore_trade_from_db(
+        self,
+        db_trade: object,
+        btc_quantity: Optional[float] = None,
+        eth_quantity: Optional[float] = None,
+        btc_entry: Optional[float] = None,
+        eth_entry: Optional[float] = None,
+        btc_current: Optional[float] = None,
+        eth_current: Optional[float] = None,
+    ):
+        try:
+            direction = PairDirection(db_trade.direction)
+        except ValueError:
+            logger.warning("Cannot restore unknown trade direction: %s", db_trade.direction)
+            return None
+
+        size_usd_per_leg = float(db_trade.size_usd or self.config.position_size_usd * 2) / 2.0
+        btc_entry_price = float(btc_entry if btc_entry is not None else (db_trade.btc_entry or 0.0))
+        eth_entry_price = float(eth_entry if eth_entry is not None else (db_trade.eth_entry or 0.0))
+        if btc_entry_price <= 0 or eth_entry_price <= 0:
+            logger.warning("Cannot restore DB trade %s without valid entry prices", db_trade.id)
+            return None
+
+        return self.position_manager.restore_pair(
+            trade_id=f"db_{db_trade.id}",
+            exchange_name=db_trade.exchange,
+            direction=direction,
+            size_usd_per_leg=size_usd_per_leg,
+            btc_entry=btc_entry_price,
+            eth_entry=eth_entry_price,
+            opened_at=self._datetime_to_timestamp(db_trade.opened_at),
+            zscore=float(db_trade.zscore_entry or 0.0),
+            spread_pct=float(db_trade.spread_entry or 0.0),
+            total_fees_usd=float(db_trade.fees_usd or 0.0),
+            btc_quantity=btc_quantity,
+            eth_quantity=eth_quantity,
+            btc_current=btc_current,
+            eth_current=eth_current,
+        )
+
+    @staticmethod
+    def _datetime_to_timestamp(value) -> float:
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return value.timestamp()
+        return time.time()
+
     # ── 메인 실행 ───────────────────────────────────────────
 
     async def start(self) -> None:
@@ -165,6 +303,7 @@ class BotEngine:
             or next(iter(self.exchanges.values()), None)
         )
         await self._validate_live_execution()
+        await self._restore_open_trades()
         self._running = True
         if self.telegram:
             await self.telegram.status(

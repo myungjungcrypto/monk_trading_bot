@@ -317,6 +317,72 @@ class PositionManager:
         )
         return trade
 
+    def restore_pair(
+        self,
+        *,
+        trade_id: str,
+        exchange_name: str,
+        direction: PairDirection,
+        size_usd_per_leg: float,
+        btc_entry: float,
+        eth_entry: float,
+        opened_at: float,
+        zscore: float = 0.0,
+        spread_pct: float = 0.0,
+        total_fees_usd: float = 0.0,
+        btc_quantity: Optional[float] = None,
+        eth_quantity: Optional[float] = None,
+        btc_current: Optional[float] = None,
+        eth_current: Optional[float] = None,
+    ) -> Optional[PairTrade]:
+        """DB/거래소에 남아 있는 열린 페어 포지션을 메모리 상태로 복원합니다."""
+        if direction == PairDirection.LONG_BTC_SHORT_ETH:
+            btc_side = PositionSide.LONG
+            eth_side = PositionSide.SHORT
+        else:
+            btc_side = PositionSide.SHORT
+            eth_side = PositionSide.LONG
+
+        btc_qty = btc_quantity or self._calculate_quantity(size_usd_per_leg, btc_entry, "BTC")
+        eth_qty = eth_quantity or self._calculate_quantity(size_usd_per_leg, eth_entry, "ETH")
+        if btc_qty <= 0 or eth_qty <= 0:
+            logger.error("Invalid restored quantity: BTC=%s ETH=%s", btc_qty, eth_qty)
+            return None
+
+        trade = PairTrade(
+            trade_id=trade_id,
+            exchange_name=exchange_name,
+            direction=direction,
+            btc_leg=LegInfo(
+                asset="BTC",
+                side=btc_side,
+                size_usd=size_usd_per_leg,
+                quantity=btc_qty,
+                entry_price=btc_entry,
+                current_price=btc_current or btc_entry,
+            ),
+            eth_leg=LegInfo(
+                asset="ETH",
+                side=eth_side,
+                size_usd=size_usd_per_leg,
+                quantity=eth_qty,
+                entry_price=eth_entry,
+                current_price=eth_current or eth_entry,
+            ),
+            opened_at=opened_at,
+            zscore_at_entry=zscore,
+            spread_at_entry=spread_pct,
+            total_fees_usd=total_fees_usd,
+        )
+        self._update_leg_mark(trade.btc_leg, trade.btc_leg.current_price)
+        self._update_leg_mark(trade.eth_leg, trade.eth_leg.current_price)
+        self._open_trades[trade.trade_id] = trade
+        logger.info(
+            "Pair restored: %s | %s | BTC@%.2f ETH@%.4f | PNL=$%.2f",
+            trade.trade_id, direction.value, btc_entry, eth_entry, trade.net_pnl_usd,
+        )
+        return trade
+
     def update_virtual_positions(
         self,
         exchange_name: str,
