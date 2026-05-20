@@ -41,6 +41,7 @@ from backend.app.config import (
 from backend.app.models import (
     Base,
     BotConfig as DbBotConfig,
+    Trade as DbTrade,
     User,
     create_async_session_factory,
     init_db,
@@ -90,6 +91,7 @@ async def lifespan(app: FastAPI):
     logger.info("FastAPI backend started")
     global _broadcast_task
     _broadcast_task = asyncio.create_task(broadcaster.start_broadcast_loop())
+    await _auto_resume_open_trades(session_factory)
     yield
 
     # 종료 시 봇 정지
@@ -159,6 +161,38 @@ class BotStartRequest(BaseModel):
     paper_trading: bool = True
     execution_mode: Optional[str] = None
     primary_exchange: Optional[str] = None
+
+
+async def _auto_resume_open_trades(session_factory) -> None:
+    """백엔드 재시작 시 열린 DB 거래가 있으면 봇을 자동 재시작합니다."""
+    enabled = os.getenv("AUTO_RESUME_OPEN_TRADES", "true").lower() not in {"0", "false", "no"}
+    if not enabled:
+        return
+
+    global _bot_engine, _bot_task
+    if _bot_engine and _bot_engine.is_running:
+        return
+
+    async with session_factory() as db:
+        result = await db.execute(select(DbTrade).where(DbTrade.closed_at.is_(None)))
+        open_trades = result.scalars().all()
+        if not open_trades:
+            return
+        configs = await _load_config_map(db)
+
+    from backend.bot.engine import BotEngine
+
+    exchanges = _build_exchanges(configs)
+    if not exchanges:
+        logger.warning("Open DB trades exist, but no exchanges are configured; cannot auto-resume bot")
+        return
+
+    config = _build_runtime_config(BotStartRequest(), configs)
+    _bot_engine = BotEngine(exchanges=exchanges, config=config)
+    _bot_engine.set_session_factory(session_factory)
+    broadcaster.set_bot_engine(_bot_engine)
+    _bot_task = asyncio.create_task(_bot_engine.start())
+    logger.info("Auto-resuming bot with %d open DB trade(s)", len(open_trades))
 
 
 async def _load_config_map(db: AsyncSession) -> Dict[str, Dict[str, Any]]:
