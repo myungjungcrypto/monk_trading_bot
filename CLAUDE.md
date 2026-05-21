@@ -581,4 +581,54 @@ Phase 6: 배포 & 테스트
 
 ---
 
+## 15. Variational 반자동/텔레그램 승인 봇 계획
+
+Variational Omni는 공식 Trading API가 아직 공개되지 않았으므로, 자동화는 다음 순서로 진행한다.
+
+### Phase V1: Read API 신선도 검증
+
+목적: Variational `/metadata/stats`가 신호 기준으로 쓸 만큼 실시간인지 확인한다.
+
+실행:
+
+```bash
+python -m backend.scripts.check_variational_read_api --samples 300 --interval 1
+```
+
+판정 기준:
+- `quotes.updated_at` 기준 p95 quote age가 5~10초 이하면 신호 보조값으로 사용 가능.
+- 30초 이상 stale 구간이 잦으면 Variational 가격은 참고용으로만 사용.
+- 문서상 bid/ask quote는 최대 600초 캐시될 수 있으므로, 실거래 신호는 Binance/Lighter WS 기준을 우선한다.
+
+### Phase V2: WalletConnect 지원 검증
+
+목적: Variational 웹앱을 WalletConnect로 연결할 수 있는지 확인한다.
+
+권장 구조:
+- EC2에 소액 전용 EVM 지갑을 둔다.
+- WalletConnect 세션은 봇이 유지한다.
+- Variational에서 서명 요청이 오면, 봇은 요청 내용을 해석해 텔레그램으로 보낸다.
+
+### Phase V3: 텔레그램 승인 기반 서명
+
+목적: 텔레그램 승인 버튼을 누른 경우에만 EC2 소액 지갑으로 서명한다.
+
+필수 안전장치:
+- Telegram user id allowlist.
+- 승인 유효시간 30~60초.
+- 1회성 nonce.
+- 주문당 최대 notional, 일일 주문 횟수, 일일 손실 제한.
+- 승인 직전 Binance/Lighter 가격 재검증.
+- Variational quote age 제한.
+- 서명 요청/스크린샷/응답/결과 DB 저장.
+- Kill Switch 버튼.
+
+추천 실행 방식:
+1. Binance/Lighter에서 신호 생성.
+2. Variational read API는 quote freshness와 화면 검증 보조값으로 사용.
+3. WalletConnect 서명 요청을 텔레그램으로 전송.
+4. 승인 시 소액 지갑으로만 서명.
+
+---
+
 *NFA. 전략 구현 참고 목적. 실제 거래 시 충분한 테스트 후 소액부터 시작하세요.*

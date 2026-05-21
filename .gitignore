@@ -7,3 +7,4 @@ __pycache__/
 node_modules/
 .DS_Store
 *.db
+backend/data/
