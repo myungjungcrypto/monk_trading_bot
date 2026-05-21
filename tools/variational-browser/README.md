@@ -60,7 +60,7 @@ Future signal bots can create request files:
 {
   "id": "test-order-001",
   "createdAt": "2026-05-22T00:00:00.000Z",
-  "url": "https://app.variational.io",
+  "url": "https://omni.variational.io",
   "summary": "LONG BTC / SHORT ETH, $50 per leg",
   "confirmSelector": "button:has-text(\"Submit\")",
   "dryRun": true,
@@ -97,4 +97,3 @@ VARIATIONAL_BROWSER_DRY_RUN=false
 ```
 
 Keep order size small and use a dedicated Variational wallet.
-

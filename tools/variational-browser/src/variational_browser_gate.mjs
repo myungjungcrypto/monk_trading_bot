@@ -400,7 +400,7 @@ class VariationalBrowserGate {
 function loadConfig() {
   const runtimeDir = path.join(TOOL_DIR, "runtime");
   return {
-    url: env("VARIATIONAL_BROWSER_URL", "https://app.variational.io"),
+    url: env("VARIATIONAL_BROWSER_URL", "https://omni.variational.io"),
     profileDir: path.resolve(ROOT, env("VARIATIONAL_BROWSER_PROFILE_DIR", path.join("tools", "variational-browser", "runtime", "profile"))),
     requestDir: path.resolve(ROOT, env("VARIATIONAL_BROWSER_REQUEST_DIR", path.join("tools", "variational-browser", "runtime", "requests"))),
     screenshotDir: path.resolve(ROOT, env("VARIATIONAL_BROWSER_SCREENSHOT_DIR", path.join("tools", "variational-browser", "runtime", "screenshots"))),
@@ -497,4 +497,3 @@ run().catch((error) => {
   console.error("[variational-browser] fatal:", error);
   process.exit(1);
 });
-
