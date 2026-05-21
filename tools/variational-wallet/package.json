@@ -1,0 +1,21 @@
+{
+  "name": "monk-variational-wallet",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/variational_wallet_bot.mjs",
+    "check": "node --check src/variational_wallet_bot.mjs"
+  },
+  "dependencies": {
+    "@reown/walletkit": "^1.3.0",
+    "@walletconnect/core": "^2.22.4",
+    "@walletconnect/jsonrpc-utils": "^1.0.8",
+    "@walletconnect/utils": "^2.22.4",
+    "dotenv": "^17.2.3",
+    "ethers": "^6.16.0"
+  },
+  "overrides": {
+    "ws": "^8.20.1"
+  }
+}

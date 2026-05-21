@@ -609,6 +609,18 @@ python -m backend.scripts.check_variational_read_api --samples 300 --interval 1
 - WalletConnect 세션은 봇이 유지한다.
 - Variational에서 서명 요청이 오면, 봇은 요청 내용을 해석해 텔레그램으로 보낸다.
 
+실행:
+
+```bash
+cd tools/variational-wallet
+npm install
+cp .env.example .env
+nano .env
+npm start -- --pair
+```
+
+초기값은 `VARIATIONAL_WC_DRY_RUN=true`다. 이 상태에서는 텔레그램 승인까지는 테스트하지만 실제 서명은 거부한다.
+
 ### Phase V3: 텔레그램 승인 기반 서명
 
 목적: 텔레그램 승인 버튼을 누른 경우에만 EC2 소액 지갑으로 서명한다.
@@ -628,6 +640,7 @@ python -m backend.scripts.check_variational_read_api --samples 300 --interval 1
 2. Variational read API는 quote freshness와 화면 검증 보조값으로 사용.
 3. WalletConnect 서명 요청을 텔레그램으로 전송.
 4. 승인 시 소액 지갑으로만 서명.
+5. dry-run 요청 내용이 Variational 화면과 일치하는 것을 확인한 뒤 `VARIATIONAL_WC_DRY_RUN=false`로 전환한다.
 
 ---
 
