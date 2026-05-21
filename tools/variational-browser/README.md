@@ -119,6 +119,11 @@ npm start -- --approve-click --selector 'button:has-text("Submit")'
 The tool sends a screenshot to Telegram. If approved and
 `VARIATIONAL_BROWSER_DRY_RUN=false`, it clicks the selector.
 
+Before any order-click request is sent to Telegram, the browser waits up to
+`VARIATIONAL_BROWSER_REQUEST_WALLET_READY_WAIT_SEC` for the page to be `ready`.
+If the page is `disconnected` or `auth_required`, the request is blocked and a
+status screenshot is sent instead of an approval button.
+
 ## JSON Request
 
 Future signal bots can create request files:

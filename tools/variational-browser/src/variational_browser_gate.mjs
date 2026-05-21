@@ -433,6 +433,24 @@ class VariationalBrowserGate {
     await this.runSteps(request.beforeSteps || request.steps || []);
     await this.page.waitForTimeout(Number(request.previewDelayMs ?? this.config.previewDelayMs));
 
+    const walletState = await this.waitForRequestWalletReady();
+    if (walletState.stage !== "ready") {
+      const notReadyPath = await this.captureScreenshot(`${request.id || "request"}-wallet-not-ready`);
+      await this.telegram.sendPhoto(
+        notReadyPath,
+        [
+          "[Variational Browser] request blocked: wallet not ready",
+          `id: ${request.id || ""}`,
+          `stage: ${walletState.stage}`,
+          `connect_wallet_visible: ${walletState.connectWalletVisible}`,
+          `authenticate_visible: ${walletState.authenticateVisible}`,
+          `wallet_prompt_visible: ${walletState.walletPromptVisible}`,
+          "Run --status / --authenticate / --connect-wallet before retrying this request.",
+        ].join("\n").slice(0, 1024),
+      );
+      return { status: `wallet_${walletState.stage}` };
+    }
+
     const screenshotPath = await this.captureScreenshot(request.id || `request-${started}`);
     const body = this.buildApprovalBody(request, screenshotPath);
     const decision = await this.telegram.requestApproval({
@@ -537,6 +555,20 @@ class VariationalBrowserGate {
     while (state.stage === "disconnected" && Date.now() < deadline) {
       await this.page.waitForTimeout(1000);
       state = await this.assessWalletState();
+    }
+    return state;
+  }
+
+  async waitForRequestWalletReady() {
+    const deadline = Date.now() + this.config.requestWalletReadyWaitMs;
+    let state = await this.assessWalletState();
+    while (state.stage !== "ready" && Date.now() < deadline) {
+      await this.page.waitForTimeout(1000);
+      state = await this.assessWalletState();
+    }
+    if (state.stage === "ready") {
+      await this.page.waitForTimeout(this.config.connectedStableMs);
+      return this.assessWalletState();
     }
     return state;
   }
@@ -715,6 +747,7 @@ function loadConfig() {
     connectedStableMs: Number(env("VARIATIONAL_BROWSER_CONNECTED_STABLE_MS", "3000")),
     authenticateWaitMs: Number(env("VARIATIONAL_BROWSER_AUTHENTICATE_WAIT_SEC", "15")) * 1000,
     stateSettleMs: Number(env("VARIATIONAL_BROWSER_STATE_SETTLE_SEC", "8")) * 1000,
+    requestWalletReadyWaitMs: Number(env("VARIATIONAL_BROWSER_REQUEST_WALLET_READY_WAIT_SEC", "15")) * 1000,
     watchIntervalMs: Number(env("VARIATIONAL_BROWSER_WATCH_INTERVAL_MS", "1000")),
     maxRequestAgeSec: Number(env("VARIATIONAL_BROWSER_MAX_REQUEST_AGE_SEC", "60")),
     viewport: parseViewport(env("VARIATIONAL_BROWSER_VIEWPORT", "1440x1200")),
