@@ -557,9 +557,8 @@ class VariationalBrowserGate {
       await this.clickFirstAvailableOptional(this.config.orderMarketSelectors, "market tab", 2000);
     }
 
-    const sideSelectors = side === "BUY" ? this.config.orderBuySelectors : this.config.orderSellSelectors;
     console.log(`[Variational Browser] selecting ${side} side...`);
-    const clickedSide = await this.clickFirstAvailable(sideSelectors, `${side.toLowerCase()} side`);
+    const clickedSide = await this.clickOrderSide(side);
     await this.page.waitForTimeout(300);
 
     console.log("[Variational Browser] filling size input...");
@@ -573,6 +572,24 @@ class VariationalBrowserGate {
     console.log(`[Variational Browser] order panel set: side_selector=${clickedSide} size_selector=${filledSelector}`);
 
     return { symbol, side, quantity, clickedSide, filledSelector };
+  }
+
+  async clickOrderSide(side) {
+    const selectors = side === "BUY" ? this.config.orderBuySelectors : this.config.orderSellSelectors;
+    const selector = await this.clickFirstAvailableOptional(selectors, `${side.toLowerCase()} side`, 2500);
+    if (selector) return selector;
+
+    if (!this.config.orderSideFallbackEnabled) {
+      throw new Error(`Could not find ${side.toLowerCase()} side. Tried: ${selectors.join(", ")}`);
+    }
+
+    const point = side === "BUY" ? this.config.orderBuyFallbackPoint : this.config.orderSellFallbackPoint;
+    const viewport = this.page.viewportSize() || this.config.viewport;
+    const x = Math.round(viewport.width * point.x);
+    const y = Math.round(viewport.height * point.y);
+    console.log(`[Variational Browser] ${side} selector not found; clicking fallback point x=${x} y=${y}`);
+    await this.page.mouse.click(x, y);
+    return `fallback:${point.x},${point.y}`;
   }
 
   async runSteps(steps) {
@@ -914,11 +931,22 @@ function loadConfig() {
     ]),
     orderInputTimeoutMs: Number(env("VARIATIONAL_BROWSER_ORDER_INPUT_TIMEOUT_MS", "3000")),
     orderSetupDelayMs: Number(env("VARIATIONAL_BROWSER_ORDER_SETUP_DELAY_MS", "1200")),
+    orderSideFallbackEnabled: envBool("VARIATIONAL_BROWSER_SIDE_FALLBACK_ENABLED", true),
+    orderBuyFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_BUY_FALLBACK_POINT", "0.82,0.186")),
+    orderSellFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_SELL_FALLBACK_POINT", "0.94,0.186")),
     walletConnectUriSelector: env("VARIATIONAL_BROWSER_WC_URI_SELECTOR"),
     telegramToken: requireEnv("VARIATIONAL_BROWSER_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"),
     telegramChatId: requireEnv("VARIATIONAL_BROWSER_TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID"),
     telegramAllowedUserIds: envList("VARIATIONAL_BROWSER_TELEGRAM_ALLOWED_USER_IDS", envList("TELEGRAM_ALLOWED_USER_IDS", [])),
     runtimeDir,
+  };
+}
+
+function parsePoint(value) {
+  const [x, y] = String(value).split(/[x,]/i).map((part) => Number(part.trim()));
+  return {
+    x: Number.isFinite(x) && x > 0 && x < 1 ? x : 0.82,
+    y: Number.isFinite(y) && y > 0 && y < 1 ? y : 0.186,
   };
 }
 

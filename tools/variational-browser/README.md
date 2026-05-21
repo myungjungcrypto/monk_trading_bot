@@ -161,7 +161,11 @@ selects Market, selects Buy/Sell, fills the Size input with `quantity`, then
 sends the approval screenshot. The selectors are configurable through
 `VARIATIONAL_BROWSER_MARKET_TAB_SELECTORS`,
 `VARIATIONAL_BROWSER_BUY_SELECTORS`, `VARIATIONAL_BROWSER_SELL_SELECTORS`, and
-`VARIATIONAL_BROWSER_SIZE_INPUT_SELECTORS`.
+`VARIATIONAL_BROWSER_SIZE_INPUT_SELECTORS`. If the Buy/Sell text nodes are not
+discoverable in Variational's rendered DOM, the gate can fall back to viewport
+click points through `VARIATIONAL_BROWSER_BUY_FALLBACK_POINT` and
+`VARIATIONAL_BROWSER_SELL_FALLBACK_POINT`; keep this in dry-run until the
+Telegram screenshot confirms the correct side is selected.
 
 Process one request:
 
