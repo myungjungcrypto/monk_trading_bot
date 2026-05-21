@@ -183,10 +183,14 @@ class TelegramApprovalClient {
 
   async call(method, payload) {
     const url = `https://api.telegram.org/bot${this.token}/${method}`;
+    const longPollTimeoutMs = method === "getUpdates"
+      ? Number(payload?.timeout || 0) * 1000 + 10000
+      : 0;
+    const timeoutMs = Math.max(this.httpTimeoutMs, longPollTimeoutMs);
     let lastError = null;
     for (let attempt = 1; attempt <= this.httpRetries + 1; attempt += 1) {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), this.httpTimeoutMs);
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
         const response = await fetch(url, {
           method: "POST",

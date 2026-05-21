@@ -100,3 +100,6 @@ increase retry tolerance in `.env`:
 VARIATIONAL_WC_TELEGRAM_HTTP_TIMEOUT_SEC=30
 VARIATIONAL_WC_TELEGRAM_HTTP_RETRIES=5
 ```
+
+Note: `getUpdates` uses Telegram long polling. The process automatically gives
+that request extra time beyond the configured HTTP timeout.
