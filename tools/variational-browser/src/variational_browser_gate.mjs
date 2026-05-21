@@ -348,6 +348,23 @@ class VariationalBrowserGate {
     return { status: connected ? "connected" : "clicked", selector };
   }
 
+  async statusCurrentPage() {
+    await this.page.goto(this.config.url, { waitUntil: "domcontentloaded" });
+    await this.page.waitForTimeout(this.config.previewDelayMs);
+    const connectWalletVisible = await this.hasVisibleConnectWallet();
+    const screenshotPath = await this.captureScreenshot(`status-${Date.now()}`);
+    await this.telegram.sendPhoto(
+      screenshotPath,
+      [
+        "[Variational Browser] WALLET STATUS",
+        `url: ${this.page.url()}`,
+        `connected: ${connectWalletVisible ? "false" : "true"}`,
+        `connect_wallet_visible: ${connectWalletVisible}`,
+      ].join("\n"),
+    );
+    return { status: connectWalletVisible ? "disconnected" : "connected", screenshotPath };
+  }
+
   async processRequestFile(filePath) {
     const raw = await fs.promises.readFile(filePath, "utf8");
     const request = JSON.parse(raw);
@@ -693,6 +710,7 @@ function parseArgs() {
     approveClick: args.includes("--approve-click"),
     connectWallet: args.includes("--connect-wallet"),
     authenticate: args.includes("--authenticate"),
+    status: args.includes("--status"),
     request: get("--request"),
     selector: get("--selector"),
     url: get("--url"),
@@ -732,6 +750,8 @@ async function run() {
       await gate.connectWallet();
     } else if (args.authenticate) {
       await gate.authenticateCurrentPage();
+    } else if (args.status) {
+      await gate.statusCurrentPage();
     } else if (args.request) {
       await gate.processRequestFile(path.resolve(ROOT, args.request));
     } else if (args.approveClick) {
@@ -743,6 +763,7 @@ async function run() {
       console.log("  npm start -- --open");
       console.log("  npm start -- --connect-wallet");
       console.log("  npm start -- --authenticate");
+      console.log("  npm start -- --status");
       console.log("  npm start -- --approve-click --selector 'button:has-text(\"Submit\")'");
       console.log("  npm start -- --request runtime/requests/order.json");
       console.log("  npm start -- --daemon");

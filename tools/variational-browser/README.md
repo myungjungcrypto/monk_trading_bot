@@ -81,6 +81,15 @@ npm start -- --authenticate
 Keep `tools/variational-wallet` running while doing this, then approve the
 WalletConnect `SIGN REQUEST` in Telegram.
 
+To check the current browser session without sending an order-click approval:
+
+```bash
+npm start -- --status
+```
+
+The screenshot caption reports whether a visible `Connect Wallet` button was
+found.
+
 The tool first searches the DOM for `wc:` and then clicks a `Copy link` button
 and reads the clipboard. If the URI is not found, send the screenshot; the modal
 may need a custom `VARIATIONAL_BROWSER_WC_URI_SELECTOR` or
