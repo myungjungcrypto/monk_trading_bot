@@ -426,14 +426,18 @@ class VariationalBrowserGate {
   async processRequest(request) {
     this.validateRequest(request);
     const started = Date.now();
+    console.log(`[Variational Browser] processing request: ${request.id || "(no id)"}`);
 
     if (request.url) {
+      console.log(`[Variational Browser] opening: ${request.url}`);
       await this.page.goto(request.url, { waitUntil: "domcontentloaded" });
     }
     await this.runSteps(request.beforeSteps || request.steps || []);
     await this.page.waitForTimeout(Number(request.previewDelayMs ?? this.config.previewDelayMs));
 
+    console.log("[Variational Browser] checking wallet state...");
     const walletState = await this.waitForRequestWalletReady();
+    console.log(`[Variational Browser] wallet stage: ${walletState.stage}`);
     if (walletState.stage !== "ready") {
       const notReadyPath = await this.captureScreenshot(`${request.id || "request"}-wallet-not-ready`);
       await this.telegram.sendPhoto(
@@ -452,9 +456,12 @@ class VariationalBrowserGate {
     }
 
     if (request.variationalOrder) {
+      console.log("[Variational Browser] setting up order panel...");
       await this.setupVariationalOrder(request.variationalOrder);
       await this.page.waitForTimeout(Number(request.previewDelayMs ?? this.config.previewDelayMs));
+      console.log("[Variational Browser] rechecking wallet state after order setup...");
       const postSetupState = await this.waitForRequestWalletReady();
+      console.log(`[Variational Browser] wallet stage after setup: ${postSetupState.stage}`);
       if (postSetupState.stage !== "ready") {
         const notReadyPath = await this.captureScreenshot(`${request.id || "request"}-wallet-not-ready-after-setup`);
         await this.telegram.sendPhoto(
@@ -472,8 +479,10 @@ class VariationalBrowserGate {
       }
     }
 
+    console.log("[Variational Browser] capturing approval screenshot...");
     const screenshotPath = await this.captureScreenshot(request.id || `request-${started}`);
     const body = this.buildApprovalBody(request, screenshotPath);
+    console.log("[Variational Browser] sending Telegram approval request...");
     const decision = await this.telegram.requestApproval({
       title: "[Variational Browser] ORDER CLICK REQUEST",
       body,
@@ -485,18 +494,22 @@ class VariationalBrowserGate {
 
     if (!decision.approved) {
       await this.telegram.sendMessage(`[Variational Browser] rejected\nid: ${request.id}\nreason: ${decision.reason}`);
+      console.log(`[Variational Browser] request rejected: ${decision.reason}`);
       return { status: "rejected", reason: decision.reason };
     }
 
     if (request.dryRun ?? this.config.dryRun) {
       await this.telegram.sendMessage(`[Variational Browser] dry-run approved, click skipped\nid: ${request.id}`);
+      console.log("[Variational Browser] dry-run approved, click skipped");
       return { status: "dryrun" };
     }
 
+    console.log("[Variational Browser] clicking final confirm selector...");
     await this.clickConfirm(request.confirmSelector || this.config.confirmSelector);
     await this.page.waitForTimeout(Number(request.afterClickDelayMs ?? this.config.afterClickDelayMs));
     const afterPath = await this.captureScreenshot(`${request.id || "request"}-after`);
     await this.telegram.sendPhoto(afterPath, `[Variational Browser] clicked\nid: ${request.id}`);
+    console.log("[Variational Browser] final click completed");
     return { status: "clicked" };
   }
 
@@ -530,21 +543,26 @@ class VariationalBrowserGate {
     if (!quantity || Number(quantity) <= 0) {
       throw new Error(`invalid Variational order quantity: ${order.quantity}`);
     }
+    console.log(`[Variational Browser] order target: ${symbol} ${side} ${quantity}`);
 
     const targetPath = `/perpetual/${symbol}`;
     if (!this.page.url().includes(targetPath)) {
+      console.log(`[Variational Browser] switching symbol page: ${targetPath}`);
       await this.page.goto(`${this.config.variationalBaseUrl}${targetPath}`, { waitUntil: "domcontentloaded" });
       await this.page.waitForTimeout(Number(this.config.previewDelayMs));
     }
 
     if (orderType === "market") {
+      console.log("[Variational Browser] selecting market tab...");
       await this.clickFirstAvailableOptional(this.config.orderMarketSelectors, "market tab", 2000);
     }
 
     const sideSelectors = side === "BUY" ? this.config.orderBuySelectors : this.config.orderSellSelectors;
+    console.log(`[Variational Browser] selecting ${side} side...`);
     const clickedSide = await this.clickFirstAvailable(sideSelectors, `${side.toLowerCase()} side`);
     await this.page.waitForTimeout(300);
 
+    console.log("[Variational Browser] filling size input...");
     const filledSelector = await this.fillFirstAvailable(
       this.config.orderSizeInputSelectors,
       quantity,
@@ -552,6 +570,7 @@ class VariationalBrowserGate {
       this.config.orderInputTimeoutMs,
     );
     await this.page.waitForTimeout(this.config.orderSetupDelayMs);
+    console.log(`[Variational Browser] order panel set: side_selector=${clickedSide} size_selector=${filledSelector}`);
 
     return { symbol, side, quantity, clickedSide, filledSelector };
   }
