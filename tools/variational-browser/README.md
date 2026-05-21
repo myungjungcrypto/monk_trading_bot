@@ -50,7 +50,9 @@ npm start -- --connect-wallet
 `--connect-wallet` first checks the current page state. If the wallet is already
 `ready`, it skips creating a new URI. If the page is `auth_required`, it clicks
 the authenticate/login button instead. It only creates a fresh `wc:` URI when
-the page is actually `disconnected`.
+the page is actually `disconnected`. Because Variational can briefly render as
+disconnected while the browser profile hydrates, the tool waits
+`VARIATIONAL_BROWSER_STATE_SETTLE_SEC` before opening a new WalletConnect modal.
 
 If it finds a URI, it writes it to
 `tools/variational-browser/runtime/walletconnect_uri.txt` and sends the next

@@ -261,7 +261,7 @@ class VariationalBrowserGate {
   async connectWallet() {
     await this.page.goto(this.config.url, { waitUntil: "domcontentloaded" });
     await this.page.waitForTimeout(this.config.previewDelayMs);
-    const initialState = await this.assessWalletState();
+    const initialState = await this.waitForInitialWalletState();
     if (initialState.stage === "ready") {
       const screenshotPath = await this.captureScreenshot(`walletconnect-ready-${Date.now()}`);
       await this.telegram.sendPhoto(
@@ -531,6 +531,16 @@ class VariationalBrowserGate {
     return false;
   }
 
+  async waitForInitialWalletState() {
+    const deadline = Date.now() + this.config.stateSettleMs;
+    let state = await this.assessWalletState();
+    while (state.stage === "disconnected" && Date.now() < deadline) {
+      await this.page.waitForTimeout(1000);
+      state = await this.assessWalletState();
+    }
+    return state;
+  }
+
   async assessWalletState() {
     const connectWalletVisible = await this.hasVisibleConnectWallet();
     const authenticateVisible = await this.hasVisibleAuthenticate();
@@ -704,6 +714,7 @@ function loadConfig() {
     connectWaitMs: Number(env("VARIATIONAL_BROWSER_CONNECT_WAIT_SEC", "300")) * 1000,
     connectedStableMs: Number(env("VARIATIONAL_BROWSER_CONNECTED_STABLE_MS", "3000")),
     authenticateWaitMs: Number(env("VARIATIONAL_BROWSER_AUTHENTICATE_WAIT_SEC", "15")) * 1000,
+    stateSettleMs: Number(env("VARIATIONAL_BROWSER_STATE_SETTLE_SEC", "8")) * 1000,
     watchIntervalMs: Number(env("VARIATIONAL_BROWSER_WATCH_INTERVAL_MS", "1000")),
     maxRequestAgeSec: Number(env("VARIATIONAL_BROWSER_MAX_REQUEST_AGE_SEC", "60")),
     viewport: parseViewport(env("VARIATIONAL_BROWSER_VIEWPORT", "1440x1200")),
