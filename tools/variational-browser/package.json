@@ -1,0 +1,15 @@
+{
+  "name": "monk-variational-browser",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/variational_browser_gate.mjs",
+    "check": "node --check src/variational_browser_gate.mjs"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "playwright": "^1.57.0"
+  }
+}
+

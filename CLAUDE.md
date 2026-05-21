@@ -625,6 +625,10 @@ npm start -- --pair
 
 목적: 텔레그램 승인 버튼을 누른 경우에만 EC2 소액 지갑으로 서명한다.
 
+실측 결과:
+- Variational 웹은 WalletConnect 연결 후 주문마다 추가 지갑 서명을 요구하지 않을 수 있다.
+- 이 경우 WalletConnect signer는 세션 연결/재연결용이고, 주문별 승인 지점은 지갑 서명이 아니라 웹페이지 최종 주문 버튼 클릭이다.
+
 필수 안전장치:
 - Telegram user id allowlist.
 - 승인 유효시간 30~60초.
@@ -641,6 +645,33 @@ npm start -- --pair
 3. WalletConnect 서명 요청을 텔레그램으로 전송.
 4. 승인 시 소액 지갑으로만 서명.
 5. dry-run 요청 내용이 Variational 화면과 일치하는 것을 확인한 뒤 `VARIATIONAL_WC_DRY_RUN=false`로 전환한다.
+
+### Phase V4: 브라우저 클릭 게이트
+
+목적: 주문마다 지갑 서명이 발생하지 않는 경우, Playwright가 최종 주문 버튼을 누르기 전에 텔레그램 승인을 요구한다.
+
+실행:
+
+```bash
+cd tools/variational-browser
+npm install
+npx playwright install chromium
+cp .env.example .env
+nano .env
+npm start -- --open
+```
+
+운영 구조:
+- Persistent browser profile에 Variational 로그인/WalletConnect 세션을 유지한다.
+- 신호 봇은 `tools/variational-browser/runtime/requests/*.json` 주문 요청 파일을 만든다.
+- Browser gate는 주문창 세팅 후 스크린샷을 텔레그램으로 전송한다.
+- Telegram `Click` 승인 시에만 최종 주문 버튼 selector를 클릭한다.
+- 기본값은 `VARIATIONAL_BROWSER_DRY_RUN=true`이므로, 처음에는 승인 후에도 클릭하지 않는다.
+
+주의:
+- `tools/variational-wallet`과 `tools/variational-browser`를 같은 Telegram bot token으로 동시에 실행하면 `getUpdates` 이벤트를 서로 가져갈 수 있다.
+- 둘을 동시에 켤 때는 `VARIATIONAL_BROWSER_TELEGRAM_BOT_TOKEN`에 별도 봇 토큰을 쓰는 것을 권장한다.
+- selector는 Variational UI 변경에 취약하므로, 라이브 전에는 최소 주문으로 스크린샷/selector를 확인한다.
 
 ---
 
