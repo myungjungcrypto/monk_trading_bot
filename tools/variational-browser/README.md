@@ -40,6 +40,25 @@ npm start -- --open
 
 Open/connect Variational once. The persistent profile should keep the session.
 
+If you are using the EC2 WalletConnect signer, let the browser open the
+WalletConnect modal and try to extract the `wc:` URI:
+
+```bash
+npm start -- --connect-wallet
+```
+
+If it finds a URI, it writes it to
+`tools/variational-browser/runtime/walletconnect_uri.txt` and sends the next
+command to Telegram. Pair it with:
+
+```bash
+cd ~/monk_trading_bot/tools/variational-wallet
+npm start -- --uri 'wc:...'
+```
+
+If the URI is not found, send the screenshot; the modal may need a custom
+`VARIATIONAL_BROWSER_WC_URI_SELECTOR` or a selector for its copy-link button.
+
 ## Manual Click Gate
 
 Use this when the Variational page is already prepared and you only want the

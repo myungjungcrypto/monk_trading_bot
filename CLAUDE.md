@@ -673,6 +673,15 @@ npm start -- --open
 - 둘을 동시에 켤 때는 `VARIATIONAL_BROWSER_TELEGRAM_BOT_TOKEN`에 별도 봇 토큰을 쓰는 것을 권장한다.
 - selector는 Variational UI 변경에 취약하므로, 라이브 전에는 최소 주문으로 스크린샷/selector를 확인한다.
 
+WalletConnect 연결:
+
+```bash
+cd tools/variational-browser
+npm start -- --connect-wallet
+```
+
+이 명령은 EC2 headless 브라우저에서 `Connect Wallet` → `WalletConnect`를 누르고, DOM에서 `wc:` URI를 추출해 `runtime/walletconnect_uri.txt`에 저장한다. URI를 찾으면 `tools/variational-wallet`에 넘겨 세션을 연결한다.
+
 ---
 
 *NFA. 전략 구현 참고 목적. 실제 거래 시 충분한 테스트 후 소액부터 시작하세요.*

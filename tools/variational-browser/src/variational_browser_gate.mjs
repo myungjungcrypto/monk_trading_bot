@@ -255,6 +255,45 @@ class VariationalBrowserGate {
     return this.processRequest(request);
   }
 
+  async connectWallet() {
+    await this.page.goto(this.config.url, { waitUntil: "domcontentloaded" });
+    await this.page.waitForTimeout(this.config.previewDelayMs);
+
+    await this.clickFirstAvailable(this.config.connectWalletSelectors, "connect wallet");
+    await this.page.waitForTimeout(1000);
+    await this.clickFirstAvailable(this.config.walletConnectSelectors, "walletconnect");
+    await this.page.waitForTimeout(2000);
+
+    const screenshotPath = await this.captureScreenshot(`walletconnect-${Date.now()}`);
+    const uri = await this.extractWalletConnectUri();
+    if (uri) {
+      const uriPath = path.join(this.config.runtimeDir, "walletconnect_uri.txt");
+      await fs.promises.writeFile(uriPath, `${uri}\n`, { mode: 0o600 });
+      await this.telegram.sendPhoto(
+        screenshotPath,
+        [
+          "[Variational Browser] WalletConnect URI found",
+          `uri_file: ${uriPath}`,
+          "",
+          "Run:",
+          `cd ${path.join(ROOT, "tools", "variational-wallet")}`,
+          `npm start -- --uri '${uri}'`,
+        ].join("\n").slice(0, 1024),
+      );
+      console.log(uri);
+      return { status: "uri_found", uri, uriPath };
+    }
+
+    await this.telegram.sendPhoto(
+      screenshotPath,
+      [
+        "[Variational Browser] WalletConnect modal opened, but wc URI was not found in DOM.",
+        "If the modal has a Copy Link button, send the screenshot so we can add its selector.",
+      ].join("\n"),
+    );
+    return { status: "uri_not_found", screenshotPath };
+  }
+
   async processRequestFile(filePath) {
     const raw = await fs.promises.readFile(filePath, "utf8");
     const request = JSON.parse(raw);
@@ -373,6 +412,49 @@ class VariationalBrowserGate {
     await locator.click();
   }
 
+  async clickFirstAvailable(selectors, label) {
+    for (const selector of selectors) {
+      const locator = this.page.locator(selector).first();
+      try {
+        await locator.waitFor({ state: "visible", timeout: 5000 });
+        await locator.click();
+        return selector;
+      } catch {
+        // Try next selector.
+      }
+    }
+    throw new Error(`Could not find ${label}. Tried: ${selectors.join(", ")}`);
+  }
+
+  async extractWalletConnectUri() {
+    if (this.config.walletConnectUriSelector) {
+      const locator = this.page.locator(this.config.walletConnectUriSelector).first();
+      try {
+        await locator.waitFor({ state: "visible", timeout: 3000 });
+        const value = await locator.inputValue().catch(() => "");
+        const text = value || await locator.textContent().catch(() => "");
+        const href = await locator.getAttribute("href").catch(() => "");
+        const uri = findWalletConnectUri(`${value}\n${text}\n${href}`);
+        if (uri) return uri;
+      } catch {
+        // Continue with generic extraction.
+      }
+    }
+
+    const hrefs = await this.page.locator('a[href^="wc:"]').evaluateAll((nodes) => nodes.map((node) => node.href));
+    for (const href of hrefs) {
+      const uri = findWalletConnectUri(href);
+      if (uri) return uri;
+    }
+
+    const text = await this.page.locator("body").textContent().catch(() => "");
+    const textUri = findWalletConnectUri(text || "");
+    if (textUri) return textUri;
+
+    const html = await this.page.content();
+    return findWalletConnectUri(html);
+  }
+
   async captureScreenshot(id) {
     const safeId = String(id).replace(/[^a-zA-Z0-9_.-]/g, "_");
     const filePath = path.join(this.config.screenshotDir, `${new Date().toISOString().replace(/[:.]/g, "-")}_${safeId}.png`);
@@ -414,6 +496,17 @@ function loadConfig() {
     watchIntervalMs: Number(env("VARIATIONAL_BROWSER_WATCH_INTERVAL_MS", "1000")),
     maxRequestAgeSec: Number(env("VARIATIONAL_BROWSER_MAX_REQUEST_AGE_SEC", "60")),
     viewport: parseViewport(env("VARIATIONAL_BROWSER_VIEWPORT", "1440x1200")),
+    connectWalletSelectors: envList("VARIATIONAL_BROWSER_CONNECT_WALLET_SELECTORS", [
+      'button:has-text("Connect Wallet")',
+      'text="Connect Wallet"',
+    ]),
+    walletConnectSelectors: envList("VARIATIONAL_BROWSER_WALLETCONNECT_SELECTORS", [
+      'text=/WalletConnect/i',
+      'button:has-text("WalletConnect")',
+      '[data-testid*="walletconnect" i]',
+      '[aria-label*="WalletConnect" i]',
+    ]),
+    walletConnectUriSelector: env("VARIATIONAL_BROWSER_WC_URI_SELECTOR"),
     telegramToken: requireEnv("VARIATIONAL_BROWSER_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"),
     telegramChatId: requireEnv("VARIATIONAL_BROWSER_TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID"),
     telegramAllowedUserIds: envList("VARIATIONAL_BROWSER_TELEGRAM_ALLOWED_USER_IDS", envList("TELEGRAM_ALLOWED_USER_IDS", [])),
@@ -429,6 +522,12 @@ function parseViewport(value) {
   };
 }
 
+function findWalletConnectUri(text) {
+  const match = String(text || "").match(/wc:[^\s"'<>\\]+/);
+  if (!match) return "";
+  return match[0].replace(/&amp;/g, "&");
+}
+
 function parseArgs() {
   const args = process.argv.slice(2);
   const get = (flag) => {
@@ -439,6 +538,7 @@ function parseArgs() {
     open: args.includes("--open"),
     daemon: args.includes("--daemon"),
     approveClick: args.includes("--approve-click"),
+    connectWallet: args.includes("--connect-wallet"),
     request: get("--request"),
     selector: get("--selector"),
     url: get("--url"),
@@ -473,6 +573,8 @@ async function run() {
   try {
     if (args.open) {
       await gate.openOnly(args.url || config.url);
+    } else if (args.connectWallet) {
+      await gate.connectWallet();
     } else if (args.request) {
       await gate.processRequestFile(path.resolve(ROOT, args.request));
     } else if (args.approveClick) {
@@ -482,6 +584,7 @@ async function run() {
     } else {
       console.log("Usage:");
       console.log("  npm start -- --open");
+      console.log("  npm start -- --connect-wallet");
       console.log("  npm start -- --approve-click --selector 'button:has-text(\"Submit\")'");
       console.log("  npm start -- --request runtime/requests/order.json");
       console.log("  npm start -- --daemon");
