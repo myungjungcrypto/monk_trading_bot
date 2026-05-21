@@ -56,8 +56,10 @@ cd ~/monk_trading_bot/tools/variational-wallet
 npm start -- --uri 'wc:...'
 ```
 
-If the URI is not found, send the screenshot; the modal may need a custom
-`VARIATIONAL_BROWSER_WC_URI_SELECTOR` or a selector for its copy-link button.
+The tool first searches the DOM for `wc:` and then clicks a `Copy link` button
+and reads the clipboard. If the URI is not found, send the screenshot; the modal
+may need a custom `VARIATIONAL_BROWSER_WC_URI_SELECTOR` or
+`VARIATIONAL_BROWSER_WC_COPY_SELECTORS`.
 
 ## Manual Click Gate
 

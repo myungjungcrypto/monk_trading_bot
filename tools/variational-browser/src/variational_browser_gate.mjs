@@ -222,6 +222,7 @@ class VariationalBrowserGate {
       headless: this.config.headless,
       viewport: this.config.viewport,
       args: ["--disable-dev-shm-usage", "--no-sandbox"],
+      permissions: ["clipboard-read", "clipboard-write"],
     });
     this.page = this.context.pages()[0] || await this.context.newPage();
     this.page.setDefaultTimeout(this.config.actionTimeoutMs);
@@ -452,7 +453,33 @@ class VariationalBrowserGate {
     if (textUri) return textUri;
 
     const html = await this.page.content();
-    return findWalletConnectUri(html);
+    const htmlUri = findWalletConnectUri(html);
+    if (htmlUri) return htmlUri;
+
+    return this.copyAndReadWalletConnectUri();
+  }
+
+  async copyAndReadWalletConnectUri() {
+    for (const selector of this.config.walletConnectCopySelectors) {
+      const locator = this.page.locator(selector).first();
+      try {
+        await locator.waitFor({ state: "visible", timeout: 3000 });
+        await locator.click();
+        await this.page.waitForTimeout(500);
+        const clipboardText = await this.page.evaluate(async () => {
+          try {
+            return await navigator.clipboard.readText();
+          } catch {
+            return "";
+          }
+        });
+        const uri = findWalletConnectUri(clipboardText);
+        if (uri) return uri;
+      } catch {
+        // Try next copy selector.
+      }
+    }
+    return "";
   }
 
   async captureScreenshot(id) {
@@ -505,6 +532,13 @@ function loadConfig() {
       'button:has-text("WalletConnect")',
       '[data-testid*="walletconnect" i]',
       '[aria-label*="WalletConnect" i]',
+    ]),
+    walletConnectCopySelectors: envList("VARIATIONAL_BROWSER_WC_COPY_SELECTORS", [
+      'button:has-text("Copy link")',
+      'text=/Copy link/i',
+      'button:has-text("Copy")',
+      '[aria-label*="Copy" i]',
+      '[title*="Copy" i]',
     ]),
     walletConnectUriSelector: env("VARIATIONAL_BROWSER_WC_URI_SELECTOR"),
     telegramToken: requireEnv("VARIATIONAL_BROWSER_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"),
