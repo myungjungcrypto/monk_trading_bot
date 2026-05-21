@@ -88,7 +88,12 @@ npm start -- --status
 ```
 
 The screenshot caption reports whether a visible `Connect Wallet` button was
-found.
+found and whether the page is still asking for `Authenticate`. Stages:
+
+- `disconnected`: `Connect Wallet` is still visible.
+- `auth_required`: the wallet address/session is visible, but Variational still
+  shows `Authenticate` or the wallet prompt.
+- `ready`: neither `Connect Wallet` nor `Authenticate` prompts are visible.
 
 The tool first searches the DOM for `wc:` and then clicks a `Copy link` button
 and reads the clipboard. If the URI is not found, send the screenshot; the modal

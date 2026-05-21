@@ -290,15 +290,15 @@ class VariationalBrowserGate {
         "Keep this browser process running, then run the variational-wallet command in another SSH terminal.",
         "After the session is approved, this process will click the authenticate/login button if it appears.",
       ].join("\n"));
-      const connected = await this.waitForWalletConnected();
+      const connected = await this.waitForWalletReady();
       const afterPath = await this.captureScreenshot(`walletconnect-after-${Date.now()}`);
       await this.telegram.sendPhoto(
         afterPath,
         connected
-          ? "[Variational Browser] wallet appears connected"
-          : "[Variational Browser] wallet still appears disconnected after waiting",
+          ? "[Variational Browser] wallet appears ready"
+          : "[Variational Browser] wallet is not ready after waiting",
       );
-      return { status: connected ? "connected" : "uri_found_not_connected", uri, uriPath };
+      return { status: connected ? "ready" : "uri_found_not_ready", uri, uriPath };
     }
 
     await this.telegram.sendPhoto(
@@ -338,31 +338,38 @@ class VariationalBrowserGate {
     );
     await this.page.waitForTimeout(this.config.authenticateWaitMs);
     const afterPath = await this.captureScreenshot(`authenticate-after-${Date.now()}`);
-    const connected = !(await this.hasVisibleConnectWallet());
+    const walletState = await this.assessWalletState();
     await this.telegram.sendPhoto(
       afterPath,
-      connected
-        ? "[Variational Browser] wallet appears connected after authenticate"
-        : "[Variational Browser] wallet still appears disconnected after authenticate",
+      [
+        "[Variational Browser] authenticate result",
+        `stage: ${walletState.stage}`,
+        `connect_wallet_visible: ${walletState.connectWalletVisible}`,
+        `authenticate_visible: ${walletState.authenticateVisible}`,
+        `wallet_prompt_visible: ${walletState.walletPromptVisible}`,
+      ].join("\n"),
     );
-    return { status: connected ? "connected" : "clicked", selector };
+    return { status: walletState.stage, selector };
   }
 
   async statusCurrentPage() {
     await this.page.goto(this.config.url, { waitUntil: "domcontentloaded" });
     await this.page.waitForTimeout(this.config.previewDelayMs);
-    const connectWalletVisible = await this.hasVisibleConnectWallet();
+    const walletState = await this.assessWalletState();
     const screenshotPath = await this.captureScreenshot(`status-${Date.now()}`);
     await this.telegram.sendPhoto(
       screenshotPath,
       [
         "[Variational Browser] WALLET STATUS",
         `url: ${this.page.url()}`,
-        `connected: ${connectWalletVisible ? "false" : "true"}`,
-        `connect_wallet_visible: ${connectWalletVisible}`,
+        `stage: ${walletState.stage}`,
+        `ready: ${walletState.stage === "ready"}`,
+        `connect_wallet_visible: ${walletState.connectWalletVisible}`,
+        `authenticate_visible: ${walletState.authenticateVisible}`,
+        `wallet_prompt_visible: ${walletState.walletPromptVisible}`,
       ].join("\n"),
     );
-    return { status: connectWalletVisible ? "disconnected" : "connected", screenshotPath };
+    return { status: walletState.stage, screenshotPath };
   }
 
   async processRequestFile(filePath) {
@@ -483,16 +490,17 @@ class VariationalBrowserGate {
     await locator.click();
   }
 
-  async waitForWalletConnected() {
+  async waitForWalletReady() {
     const deadline = Date.now() + this.config.connectWaitMs;
     let authenticateClicked = false;
     while (Date.now() < deadline) {
       await this.page.waitForTimeout(2000);
-      if (!(await this.hasVisibleConnectWallet())) {
+      const walletState = await this.assessWalletState();
+      if (walletState.stage === "ready") {
         await this.page.waitForTimeout(this.config.connectedStableMs);
-        return !(await this.hasVisibleConnectWallet());
+        return (await this.assessWalletState()).stage === "ready";
       }
-      if (!authenticateClicked) {
+      if (!authenticateClicked && walletState.stage === "auth_required") {
         const selector = await this.clickFirstAvailableOptional(this.config.authenticateSelectors, "authenticate", 1000);
         if (selector) {
           authenticateClicked = true;
@@ -508,8 +516,43 @@ class VariationalBrowserGate {
     return false;
   }
 
+  async assessWalletState() {
+    const connectWalletVisible = await this.hasVisibleConnectWallet();
+    const authenticateVisible = await this.hasVisibleAuthenticate();
+    const walletPromptVisible = await this.hasVisibleWalletPrompt();
+    let stage = "ready";
+    if (connectWalletVisible) {
+      stage = "disconnected";
+    } else if (authenticateVisible || walletPromptVisible) {
+      stage = "auth_required";
+    }
+    return { stage, connectWalletVisible, authenticateVisible, walletPromptVisible };
+  }
+
   async hasVisibleConnectWallet() {
     for (const selector of this.config.connectWalletSelectors) {
+      const locators = await this.page.locator(selector).all();
+      for (const locator of locators) {
+        try {
+          if (await locator.isVisible()) return true;
+        } catch {
+          // Ignore stale locators.
+        }
+      }
+    }
+    return false;
+  }
+
+  async hasVisibleAuthenticate() {
+    return this.hasVisibleBySelectors(this.config.authenticateSelectors);
+  }
+
+  async hasVisibleWalletPrompt() {
+    return this.hasVisibleBySelectors(this.config.walletPromptSelectors);
+  }
+
+  async hasVisibleBySelectors(selectors) {
+    for (const selector of selectors) {
       const locators = await this.page.locator(selector).all();
       for (const locator of locators) {
         try {
@@ -674,7 +717,10 @@ function loadConfig() {
       'button:has-text("Log In")',
       'text=/Log In/i',
       'button:has-text("Continue")',
-      'button:has-text("Connect Wallet")',
+    ]),
+    walletPromptSelectors: envList("VARIATIONAL_BROWSER_WALLET_PROMPT_SELECTORS", [
+      'text=/Connect your wallet to see your positions/i',
+      'text=/Authenticate/i',
     ]),
     walletConnectUriSelector: env("VARIATIONAL_BROWSER_WC_URI_SELECTOR"),
     telegramToken: requireEnv("VARIATIONAL_BROWSER_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"),
