@@ -451,6 +451,27 @@ class VariationalBrowserGate {
       return { status: `wallet_${walletState.stage}` };
     }
 
+    if (request.variationalOrder) {
+      await this.setupVariationalOrder(request.variationalOrder);
+      await this.page.waitForTimeout(Number(request.previewDelayMs ?? this.config.previewDelayMs));
+      const postSetupState = await this.waitForRequestWalletReady();
+      if (postSetupState.stage !== "ready") {
+        const notReadyPath = await this.captureScreenshot(`${request.id || "request"}-wallet-not-ready-after-setup`);
+        await this.telegram.sendPhoto(
+          notReadyPath,
+          [
+            "[Variational Browser] request blocked after order setup: wallet not ready",
+            `id: ${request.id || ""}`,
+            `stage: ${postSetupState.stage}`,
+            `connect_wallet_visible: ${postSetupState.connectWalletVisible}`,
+            `authenticate_visible: ${postSetupState.authenticateVisible}`,
+            `wallet_prompt_visible: ${postSetupState.walletPromptVisible}`,
+          ].join("\n").slice(0, 1024),
+        );
+        return { status: `wallet_${postSetupState.stage}` };
+      }
+    }
+
     const screenshotPath = await this.captureScreenshot(request.id || `request-${started}`);
     const body = this.buildApprovalBody(request, screenshotPath);
     const decision = await this.telegram.requestApproval({
@@ -492,6 +513,47 @@ class VariationalBrowserGate {
     if (!selector) {
       throw new Error("confirmSelector is required");
     }
+  }
+
+  async setupVariationalOrder(order) {
+    const symbol = String(order.symbol || "").toUpperCase();
+    const side = String(order.side || "").toUpperCase();
+    const quantity = String(order.quantity ?? "").trim();
+    const orderType = String(order.orderType || "market").toLowerCase();
+
+    if (!["BTC", "ETH"].includes(symbol)) {
+      throw new Error(`unsupported Variational order symbol: ${order.symbol}`);
+    }
+    if (!["BUY", "SELL"].includes(side)) {
+      throw new Error(`unsupported Variational order side: ${order.side}`);
+    }
+    if (!quantity || Number(quantity) <= 0) {
+      throw new Error(`invalid Variational order quantity: ${order.quantity}`);
+    }
+
+    const targetPath = `/perpetual/${symbol}`;
+    if (!this.page.url().includes(targetPath)) {
+      await this.page.goto(`${this.config.variationalBaseUrl}${targetPath}`, { waitUntil: "domcontentloaded" });
+      await this.page.waitForTimeout(Number(this.config.previewDelayMs));
+    }
+
+    if (orderType === "market") {
+      await this.clickFirstAvailableOptional(this.config.orderMarketSelectors, "market tab", 2000);
+    }
+
+    const sideSelectors = side === "BUY" ? this.config.orderBuySelectors : this.config.orderSellSelectors;
+    const clickedSide = await this.clickFirstAvailable(sideSelectors, `${side.toLowerCase()} side`);
+    await this.page.waitForTimeout(300);
+
+    const filledSelector = await this.fillFirstAvailable(
+      this.config.orderSizeInputSelectors,
+      quantity,
+      "size input",
+      this.config.orderInputTimeoutMs,
+    );
+    await this.page.waitForTimeout(this.config.orderSetupDelayMs);
+
+    return { symbol, side, quantity, clickedSide, filledSelector };
   }
 
   async runSteps(steps) {
@@ -650,6 +712,28 @@ class VariationalBrowserGate {
     return "";
   }
 
+  async fillFirstAvailable(selectors, value, label, timeoutMs = 3000) {
+    for (const selector of selectors) {
+      const locator = this.page.locator(selector).first();
+      try {
+        await locator.waitFor({ state: "visible", timeout: timeoutMs });
+        await locator.fill(String(value), { timeout: timeoutMs });
+        return selector;
+      } catch {
+        try {
+          await locator.waitFor({ state: "visible", timeout: timeoutMs });
+          await locator.click();
+          await this.page.keyboard.press("Control+A");
+          await this.page.keyboard.type(String(value));
+          return selector;
+        } catch {
+          // Try next selector.
+        }
+      }
+    }
+    throw new Error(`Could not fill ${label}. Tried: ${selectors.join(", ")}`);
+  }
+
   async extractWalletConnectUri() {
     if (this.config.walletConnectUriSelector) {
       const locator = this.page.locator(this.config.walletConnectUriSelector).first();
@@ -724,6 +808,9 @@ class VariationalBrowserGate {
     if (request.signal) {
       lines.push("", "signal:", JSON.stringify(request.signal, null, 2).slice(0, 1200));
     }
+    if (request.variationalOrder) {
+      lines.push("", "variational_order:", JSON.stringify(request.variationalOrder, null, 2).slice(0, 800));
+    }
     lines.push("", `screenshot: ${screenshotPath}`);
     return lines.join("\n").slice(0, 3500);
   }
@@ -731,8 +818,10 @@ class VariationalBrowserGate {
 
 function loadConfig() {
   const runtimeDir = path.join(TOOL_DIR, "runtime");
+  const url = env("VARIATIONAL_BROWSER_URL", "https://omni.variational.io");
   return {
-    url: env("VARIATIONAL_BROWSER_URL", "https://omni.variational.io"),
+    url,
+    variationalBaseUrl: normalizeBaseUrl(env("VARIATIONAL_BROWSER_BASE_URL", url)),
     profileDir: path.resolve(ROOT, env("VARIATIONAL_BROWSER_PROFILE_DIR", path.join("tools", "variational-browser", "runtime", "profile"))),
     requestDir: path.resolve(ROOT, env("VARIATIONAL_BROWSER_REQUEST_DIR", path.join("tools", "variational-browser", "runtime", "requests"))),
     screenshotDir: path.resolve(ROOT, env("VARIATIONAL_BROWSER_SCREENSHOT_DIR", path.join("tools", "variational-browser", "runtime", "screenshots"))),
@@ -781,12 +870,46 @@ function loadConfig() {
       'text=/Connect your wallet to see your positions/i',
       'text=/Authenticate/i',
     ]),
+    orderMarketSelectors: envList("VARIATIONAL_BROWSER_MARKET_TAB_SELECTORS", [
+      'button:has-text("Market")',
+      '[role="tab"]:has-text("Market")',
+      'text=/^Market$/',
+    ]),
+    orderBuySelectors: envList("VARIATIONAL_BROWSER_BUY_SELECTORS", [
+      'button:has-text("Buy")',
+      '[role="button"]:has-text("Buy")',
+      'text=/^Buy/i',
+    ]),
+    orderSellSelectors: envList("VARIATIONAL_BROWSER_SELL_SELECTORS", [
+      'button:has-text("Sell")',
+      '[role="button"]:has-text("Sell")',
+      'text=/^Sell/i',
+    ]),
+    orderSizeInputSelectors: envList("VARIATIONAL_BROWSER_SIZE_INPUT_SELECTORS", [
+      'input[placeholder*="Size" i]',
+      'input[name*="size" i]',
+      'input[aria-label*="Size" i]',
+      'input[type="number"]',
+      '[contenteditable="true"]',
+      'input',
+    ]),
+    orderInputTimeoutMs: Number(env("VARIATIONAL_BROWSER_ORDER_INPUT_TIMEOUT_MS", "3000")),
+    orderSetupDelayMs: Number(env("VARIATIONAL_BROWSER_ORDER_SETUP_DELAY_MS", "1200")),
     walletConnectUriSelector: env("VARIATIONAL_BROWSER_WC_URI_SELECTOR"),
     telegramToken: requireEnv("VARIATIONAL_BROWSER_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"),
     telegramChatId: requireEnv("VARIATIONAL_BROWSER_TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID"),
     telegramAllowedUserIds: envList("VARIATIONAL_BROWSER_TELEGRAM_ALLOWED_USER_IDS", envList("TELEGRAM_ALLOWED_USER_IDS", [])),
     runtimeDir,
   };
+}
+
+function normalizeBaseUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return parsed.origin;
+  } catch {
+    return "https://omni.variational.io";
+  }
 }
 
 function parseViewport(value) {

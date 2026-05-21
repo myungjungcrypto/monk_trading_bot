@@ -132,12 +132,20 @@ Future signal bots can create request files:
 {
   "id": "test-order-001",
   "createdAt": "2026-05-22T00:00:00.000Z",
-  "url": "https://omni.variational.io",
-  "summary": "LONG BTC / SHORT ETH, $50 per leg",
+  "url": "https://omni.variational.io/perpetual/BTC",
+  "summary": "LONG_BTC_SHORT_ETH / BTC BUY / $50",
   "confirmSelector": "button:has-text(\"Submit\")",
   "dryRun": true,
+  "variationalOrder": {
+    "symbol": "BTC",
+    "side": "BUY",
+    "orderType": "market",
+    "quantity": "0.000645",
+    "sizeUsd": 50,
+    "fairPrice": 77533.4,
+    "pairDirection": "LONG_BTC_SHORT_ETH"
+  },
   "steps": [
-    { "type": "fill", "selector": "input[name=\"size\"]", "value": "50" },
     { "type": "wait", "ms": 1000 }
   ],
   "signal": {
@@ -147,6 +155,13 @@ Future signal bots can create request files:
   }
 }
 ```
+
+When `variationalOrder` is present, the gate navigates to the symbol page,
+selects Market, selects Buy/Sell, fills the Size input with `quantity`, then
+sends the approval screenshot. The selectors are configurable through
+`VARIATIONAL_BROWSER_MARKET_TAB_SELECTORS`,
+`VARIATIONAL_BROWSER_BUY_SELECTORS`, `VARIATIONAL_BROWSER_SELL_SELECTORS`, and
+`VARIATIONAL_BROWSER_SIZE_INPUT_SELECTORS`.
 
 Process one request:
 
@@ -164,8 +179,18 @@ python -m backend.scripts.create_variational_browser_request \
   --size-usd 50
 ```
 
-The generated request summary uses external median fair prices, not
-Variational's screen price. The request stays dry-run by default.
+The generator creates one request per leg by default. For
+`LONG_BTC_SHORT_ETH`, that means a BTC Buy request and an ETH Sell request. The
+request summary and `variationalOrder.quantity` use external median fair prices,
+not Variational's screen price. The requests stay dry-run by default. To create
+only one leg while testing selectors:
+
+```bash
+python -m backend.scripts.create_variational_browser_request \
+  --direction LONG_BTC_SHORT_ETH \
+  --size-usd 50 \
+  --legs BTC
+```
 
 Watch a directory:
 

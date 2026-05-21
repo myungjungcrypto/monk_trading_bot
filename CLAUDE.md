@@ -674,12 +674,27 @@ python -m backend.scripts.create_variational_browser_request \
   --size-usd 50
 ```
 
-생성된 요청은 `tools/variational-browser/runtime/requests/*.json`에 저장되고, 요약에는 Binance/Lighter/Hyperliquid median fair price가 포함된다. 기본값은 dry-run이다.
+생성된 요청은 `tools/variational-browser/runtime/requests/*.json`에 저장된다. 기본값은 두 다리 모두 생성한다.
+
+- `LONG_BTC_SHORT_ETH` → BTC Buy 요청 + ETH Sell 요청
+- `SHORT_BTC_LONG_ETH` → BTC Sell 요청 + ETH Buy 요청
+
+각 요청의 `variationalOrder.quantity`는 Binance/Lighter/Hyperliquid median fair price 기준으로 `size_usd / fair_price`를 계산한다. 기본값은 dry-run이다.
+
+단일 다리 selector만 테스트할 때:
+
+```bash
+python -m backend.scripts.create_variational_browser_request \
+  --direction LONG_BTC_SHORT_ETH \
+  --size-usd 50 \
+  --legs BTC
+```
 
 운영 원칙:
 - Variational 화면 가격은 체결 UI 확인용이다.
 - 진입/청산 신호, 텔레그램 승인 요약, 주문 직전 sanity check는 외부 median fair price를 기준으로 한다.
 - 3개 중 1개 소스가 응답하지 않아도 2개 이상이면 진행 가능하다.
+- Browser gate는 `variationalOrder`가 있으면 symbol 페이지 이동 → Market 탭 → Buy/Sell 선택 → Size 입력 → 스크린샷 승인 순서로 처리한다.
 
 ### Phase V4: 브라우저 클릭 게이트
 
