@@ -5,6 +5,7 @@ import { formatJsonRpcError, formatJsonRpcResult } from "@walletconnect/jsonrpc-
 import { buildApprovedNamespaces, getSdkError } from "@walletconnect/utils";
 import { WalletKit } from "@reown/walletkit";
 import dotenv from "dotenv";
+import dns from "node:dns";
 import { ethers } from "ethers";
 import fs from "node:fs";
 import path from "node:path";
@@ -33,6 +34,8 @@ const DEFAULT_EVENTS = ["accountsChanged", "chainChanged", "message", "disconnec
 const DEFAULT_CHAINS = ["eip155:42161"];
 const DEFAULT_ARBITRUM_RPC = "https://arb1.arbitrum.io/rpc";
 
+dns.setDefaultResultOrder("ipv4first");
+
 function env(name, fallback = "") {
   return process.env[name]?.trim() || fallback;
 }
@@ -58,11 +61,13 @@ function requireEnv(name) {
 }
 
 class TelegramApprovalClient {
-  constructor({ token, chatId, allowedUserIds, timeoutMs }) {
+  constructor({ token, chatId, allowedUserIds, timeoutMs, httpTimeoutMs, httpRetries }) {
     this.token = token;
     this.chatId = chatId;
     this.allowedUserIds = new Set(allowedUserIds.map(String));
     this.timeoutMs = timeoutMs;
+    this.httpTimeoutMs = httpTimeoutMs;
+    this.httpRetries = httpRetries;
     this.offset = 0;
     this.pending = new Map();
     this.running = false;
@@ -178,16 +183,32 @@ class TelegramApprovalClient {
 
   async call(method, payload) {
     const url = `https://api.telegram.org/bot${this.token}/${method}`;
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const data = await response.json();
-    if (!response.ok || data.ok === false) {
-      throw new Error(`${method} failed: ${response.status} ${JSON.stringify(data).slice(0, 500)}`);
+    let lastError = null;
+    for (let attempt = 1; attempt <= this.httpRetries + 1; attempt += 1) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), this.httpTimeoutMs);
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+        const data = await response.json();
+        if (!response.ok || data.ok === false) {
+          throw new Error(`${method} failed: ${response.status} ${JSON.stringify(data).slice(0, 500)}`);
+        }
+        return data;
+      } catch (error) {
+        lastError = error;
+        if (attempt > this.httpRetries) break;
+        console.warn(`[telegram] ${method} failed; retrying ${attempt}/${this.httpRetries}: ${error.message}`);
+        await sleep(Math.min(1000 * attempt, 5000));
+      } finally {
+        clearTimeout(timer);
+      }
     }
-    return data;
+    throw lastError;
   }
 }
 
@@ -201,6 +222,8 @@ class VariationalWalletBot {
       chatId: config.telegramChatId,
       allowedUserIds: config.telegramAllowedUserIds,
       timeoutMs: config.approvalTimeoutMs,
+      httpTimeoutMs: config.telegramHttpTimeoutMs,
+      httpRetries: config.telegramHttpRetries,
     });
     this.walletKit = null;
   }
@@ -525,6 +548,8 @@ function loadConfig() {
     telegramChatId: requireEnv("TELEGRAM_CHAT_ID"),
     telegramAllowedUserIds: envList("TELEGRAM_ALLOWED_USER_IDS", []),
     approvalTimeoutMs: Number(env("VARIATIONAL_WC_APPROVAL_TIMEOUT_SEC", "45")) * 1000,
+    telegramHttpTimeoutMs: Number(env("VARIATIONAL_WC_TELEGRAM_HTTP_TIMEOUT_SEC", "20")) * 1000,
+    telegramHttpRetries: Number(env("VARIATIONAL_WC_TELEGRAM_HTTP_RETRIES", "3")),
     sessionApprovalTimeoutMs: Number(env("VARIATIONAL_WC_SESSION_APPROVAL_TIMEOUT_SEC", "120")) * 1000,
     chains: envList("VARIATIONAL_WC_CHAINS", DEFAULT_CHAINS),
     methods: envList("VARIATIONAL_WC_METHODS", DEFAULT_METHODS),

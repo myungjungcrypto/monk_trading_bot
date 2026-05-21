@@ -83,3 +83,20 @@ not complete. You can still keep browser order clicks in dry-run mode with
 
 Leave `VARIATIONAL_WC_ALLOW_SEND_TRANSACTION=false` unless Variational actually
 uses `eth_sendTransaction` and you have tested it with a tiny balance.
+
+## Telegram Connectivity
+
+The signer keeps Telegram approval as a hard safety gate. If startup fails with
+`fetch failed` or `ETIMEDOUT`, check EC2 outbound connectivity:
+
+```bash
+curl -4 -I --connect-timeout 10 --max-time 20 https://api.telegram.org
+```
+
+The wallet process uses IPv4-first DNS and retries Telegram API calls. You can
+increase retry tolerance in `.env`:
+
+```env
+VARIATIONAL_WC_TELEGRAM_HTTP_TIMEOUT_SEC=30
+VARIATIONAL_WC_TELEGRAM_HTTP_RETRIES=5
+```
