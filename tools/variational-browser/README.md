@@ -47,6 +47,11 @@ WalletConnect modal and try to extract the `wc:` URI:
 npm start -- --connect-wallet
 ```
 
+`--connect-wallet` first checks the current page state. If the wallet is already
+`ready`, it skips creating a new URI. If the page is `auth_required`, it clicks
+the authenticate/login button instead. It only creates a fresh `wc:` URI when
+the page is actually `disconnected`.
+
 If it finds a URI, it writes it to
 `tools/variational-browser/runtime/walletconnect_uri.txt` and sends the next
 command to Telegram. Keep this browser command running, open a second SSH

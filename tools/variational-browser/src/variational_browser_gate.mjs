@@ -261,6 +261,19 @@ class VariationalBrowserGate {
   async connectWallet() {
     await this.page.goto(this.config.url, { waitUntil: "domcontentloaded" });
     await this.page.waitForTimeout(this.config.previewDelayMs);
+    const initialState = await this.assessWalletState();
+    if (initialState.stage === "ready") {
+      const screenshotPath = await this.captureScreenshot(`walletconnect-ready-${Date.now()}`);
+      await this.telegram.sendPhoto(
+        screenshotPath,
+        "[Variational Browser] wallet already ready; skipped new WalletConnect URI",
+      );
+      return { status: "ready" };
+    }
+    if (initialState.stage === "auth_required") {
+      await this.telegram.sendMessage("[Variational Browser] wallet session already present; triggering authenticate instead of creating a new URI");
+      return this.authenticateCurrentPage({ alreadyLoaded: true });
+    }
 
     await this.clickFirstAvailable(this.config.connectWalletSelectors, "connect wallet");
     await this.page.waitForTimeout(1000);
@@ -311,9 +324,11 @@ class VariationalBrowserGate {
     return { status: "uri_not_found", screenshotPath };
   }
 
-  async authenticateCurrentPage() {
-    await this.page.goto(this.config.url, { waitUntil: "domcontentloaded" });
-    await this.page.waitForTimeout(this.config.previewDelayMs);
+  async authenticateCurrentPage({ alreadyLoaded = false } = {}) {
+    if (!alreadyLoaded) {
+      await this.page.goto(this.config.url, { waitUntil: "domcontentloaded" });
+      await this.page.waitForTimeout(this.config.previewDelayMs);
+    }
     const beforePath = await this.captureScreenshot(`authenticate-before-${Date.now()}`);
     const selector = await this.clickFirstAvailableOptional(this.config.authenticateSelectors, "authenticate", 5000);
     if (!selector) {
