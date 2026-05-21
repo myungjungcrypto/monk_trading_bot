@@ -49,12 +49,19 @@ npm start -- --connect-wallet
 
 If it finds a URI, it writes it to
 `tools/variational-browser/runtime/walletconnect_uri.txt` and sends the next
-command to Telegram. Pair it with:
+command to Telegram. Keep this browser command running, open a second SSH
+terminal, and pair it with:
 
 ```bash
 cd ~/monk_trading_bot/tools/variational-wallet
 npm start -- --uri 'wc:...'
 ```
+
+During `--connect-wallet`, the browser process does not poll Telegram buttons,
+so it will not steal the wallet signer's `SESSION REQUEST` approval callback if
+both processes use the same bot token. It waits up to
+`VARIATIONAL_BROWSER_CONNECT_WAIT_SEC` for the dApp to reflect the connected
+wallet, then sends a fresh screenshot.
 
 The tool first searches the DOM for `wc:` and then clicks a `Copy link` button
 and reads the clipboard. If the URI is not found, send the screenshot; the modal

@@ -212,8 +212,10 @@ class VariationalBrowserGate {
     this.page = null;
   }
 
-  async start() {
-    this.telegram.start();
+  async start({ pollTelegram = true } = {}) {
+    if (pollTelegram) {
+      this.telegram.start();
+    }
     await ensureDir(this.config.profileDir);
     await ensureDir(this.config.screenshotDir);
     await ensureDir(this.config.requestDir);
@@ -282,7 +284,20 @@ class VariationalBrowserGate {
         ].join("\n").slice(0, 1024),
       );
       console.log(uri);
-      return { status: "uri_found", uri, uriPath };
+      await this.telegram.sendMessage([
+        "[Variational Browser] waiting for WalletConnect approval",
+        `timeout_sec: ${Math.round(this.config.connectWaitMs / 1000)}`,
+        "Keep this browser process running, then run the variational-wallet command in another SSH terminal.",
+      ].join("\n"));
+      const connected = await this.waitForWalletConnected();
+      const afterPath = await this.captureScreenshot(`walletconnect-after-${Date.now()}`);
+      await this.telegram.sendPhoto(
+        afterPath,
+        connected
+          ? "[Variational Browser] wallet appears connected"
+          : "[Variational Browser] wallet still appears disconnected after waiting",
+      );
+      return { status: connected ? "connected" : "uri_found_not_connected", uri, uriPath };
     }
 
     await this.telegram.sendPhoto(
@@ -413,6 +428,32 @@ class VariationalBrowserGate {
     await locator.click();
   }
 
+  async waitForWalletConnected() {
+    const deadline = Date.now() + this.config.connectWaitMs;
+    while (Date.now() < deadline) {
+      await this.page.waitForTimeout(2000);
+      if (!(await this.hasVisibleConnectWallet())) {
+        await this.page.waitForTimeout(this.config.connectedStableMs);
+        return !(await this.hasVisibleConnectWallet());
+      }
+    }
+    return false;
+  }
+
+  async hasVisibleConnectWallet() {
+    for (const selector of this.config.connectWalletSelectors) {
+      const locators = await this.page.locator(selector).all();
+      for (const locator of locators) {
+        try {
+          if (await locator.isVisible()) return true;
+        } catch {
+          // Ignore stale locators.
+        }
+      }
+    }
+    return false;
+  }
+
   async clickFirstAvailable(selectors, label) {
     for (const selector of selectors) {
       const locator = this.page.locator(selector).first();
@@ -520,6 +561,8 @@ function loadConfig() {
     actionTimeoutMs: Number(env("VARIATIONAL_BROWSER_ACTION_TIMEOUT_SEC", "15000")),
     previewDelayMs: Number(env("VARIATIONAL_BROWSER_PREVIEW_DELAY_MS", "1000")),
     afterClickDelayMs: Number(env("VARIATIONAL_BROWSER_AFTER_CLICK_DELAY_MS", "3000")),
+    connectWaitMs: Number(env("VARIATIONAL_BROWSER_CONNECT_WAIT_SEC", "180")) * 1000,
+    connectedStableMs: Number(env("VARIATIONAL_BROWSER_CONNECTED_STABLE_MS", "3000")),
     watchIntervalMs: Number(env("VARIATIONAL_BROWSER_WATCH_INTERVAL_MS", "1000")),
     maxRequestAgeSec: Number(env("VARIATIONAL_BROWSER_MAX_REQUEST_AGE_SEC", "60")),
     viewport: parseViewport(env("VARIATIONAL_BROWSER_VIEWPORT", "1440x1200")),
@@ -602,7 +645,8 @@ async function run() {
   }
 
   const gate = new VariationalBrowserGate(config);
-  await gate.start();
+  const pollTelegram = args.approveClick || Boolean(args.request) || args.daemon;
+  await gate.start({ pollTelegram });
 
   try {
     if (args.open) {

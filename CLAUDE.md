@@ -680,7 +680,7 @@ cd tools/variational-browser
 npm start -- --connect-wallet
 ```
 
-이 명령은 EC2 headless 브라우저에서 `Connect Wallet` → `WalletConnect`를 누르고, DOM에서 `wc:` URI를 추출해 `runtime/walletconnect_uri.txt`에 저장한다. URI를 찾으면 `tools/variational-wallet`에 넘겨 세션을 연결한다.
+이 명령은 EC2 headless 브라우저에서 `Connect Wallet` → `WalletConnect`를 누르고, DOM/`Copy link`에서 `wc:` URI를 추출해 `runtime/walletconnect_uri.txt`에 저장한다. URI를 찾으면 브라우저 프로세스를 켜둔 채 두 번째 SSH 터미널에서 `tools/variational-wallet`에 URI를 넘겨 세션을 연결한다. `--connect-wallet` 중에는 Telegram button polling을 하지 않으므로 wallet signer의 승인 callback을 빼앗지 않는다.
 
 ---
 
