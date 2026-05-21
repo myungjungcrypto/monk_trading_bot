@@ -149,6 +149,19 @@ Process one request:
 npm start -- --request tools/variational-browser/runtime/requests/test-order-001.json
 ```
 
+Create a dry-run request with Binance/Lighter/Hyperliquid median fair prices:
+
+```bash
+cd ~/monk_trading_bot
+source venv/bin/activate
+python -m backend.scripts.create_variational_browser_request \
+  --direction LONG_BTC_SHORT_ETH \
+  --size-usd 50
+```
+
+The generated request summary uses external median fair prices, not
+Variational's screen price. The request stays dry-run by default.
+
 Watch a directory:
 
 ```bash

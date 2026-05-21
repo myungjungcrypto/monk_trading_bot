@@ -634,17 +634,52 @@ npm start -- --pair
 - 승인 유효시간 30~60초.
 - 1회성 nonce.
 - 주문당 최대 notional, 일일 주문 횟수, 일일 손실 제한.
-- 승인 직전 Binance/Lighter 가격 재검증.
+- 승인 직전 Binance/Lighter/Hyperliquid median fair price 재검증.
 - Variational quote age 제한.
 - 서명 요청/스크린샷/응답/결과 DB 저장.
 - Kill Switch 버튼.
 
 추천 실행 방식:
-1. Binance/Lighter에서 신호 생성.
-2. Variational read API는 quote freshness와 화면 검증 보조값으로 사용.
+1. Binance/Lighter/Hyperliquid 외부 가격에서 신호와 주문 기준가를 생성한다.
+2. Variational read API는 quote freshness와 화면 검증 보조값으로만 사용한다.
 3. WalletConnect 서명 요청을 텔레그램으로 전송.
 4. 승인 시 소액 지갑으로만 서명.
 5. dry-run 요청 내용이 Variational 화면과 일치하는 것을 확인한 뒤 `VARIATIONAL_WC_DRY_RUN=false`로 전환한다.
+
+### Phase V3.5: 외부 공정가 기준
+
+목적: Variational 자체 가격이 멈추거나 늦게 갱신될 수 있으므로, 주문 판단 기준은 외부 가격 median으로 잡는다.
+
+구현:
+- `backend.bot.fair_price.FairPriceOracle`
+- 소스: Binance USDT-M bookTicker, Lighter ticker WebSocket, Hyperliquid `allMids`
+- 최소 소스 수: `FAIR_PRICE_MIN_SOURCES=2`
+- 기본 공정가: 살아 있는 소스들의 median
+- 한 소스가 멈추거나 튀어도 median과 source age/deviation guard로 방어한다.
+
+EC2 확인:
+
+```bash
+cd ~/monk_trading_bot
+source venv/bin/activate
+python -m backend.scripts.check_fair_price
+python -m backend.scripts.check_fair_price --json
+```
+
+Variational browser gate 요청 생성:
+
+```bash
+python -m backend.scripts.create_variational_browser_request \
+  --direction LONG_BTC_SHORT_ETH \
+  --size-usd 50
+```
+
+생성된 요청은 `tools/variational-browser/runtime/requests/*.json`에 저장되고, 요약에는 Binance/Lighter/Hyperliquid median fair price가 포함된다. 기본값은 dry-run이다.
+
+운영 원칙:
+- Variational 화면 가격은 체결 UI 확인용이다.
+- 진입/청산 신호, 텔레그램 승인 요약, 주문 직전 sanity check는 외부 median fair price를 기준으로 한다.
+- 3개 중 1개 소스가 응답하지 않아도 2개 이상이면 진행 가능하다.
 
 ### Phase V4: 브라우저 클릭 게이트
 
