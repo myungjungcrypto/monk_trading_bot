@@ -288,6 +288,7 @@ class VariationalBrowserGate {
         "[Variational Browser] waiting for WalletConnect approval",
         `timeout_sec: ${Math.round(this.config.connectWaitMs / 1000)}`,
         "Keep this browser process running, then run the variational-wallet command in another SSH terminal.",
+        "After the session is approved, this process will click the authenticate/login button if it appears.",
       ].join("\n"));
       const connected = await this.waitForWalletConnected();
       const afterPath = await this.captureScreenshot(`walletconnect-after-${Date.now()}`);
@@ -308,6 +309,43 @@ class VariationalBrowserGate {
       ].join("\n"),
     );
     return { status: "uri_not_found", screenshotPath };
+  }
+
+  async authenticateCurrentPage() {
+    await this.page.goto(this.config.url, { waitUntil: "domcontentloaded" });
+    await this.page.waitForTimeout(this.config.previewDelayMs);
+    const beforePath = await this.captureScreenshot(`authenticate-before-${Date.now()}`);
+    const selector = await this.clickFirstAvailableOptional(this.config.authenticateSelectors, "authenticate", 5000);
+    if (!selector) {
+      await this.telegram.sendPhoto(
+        beforePath,
+        [
+          "[Variational Browser] authenticate button not found",
+          `url: ${this.page.url()}`,
+          `selectors: ${this.config.authenticateSelectors.join(", ")}`,
+        ].join("\n").slice(0, 1024),
+      );
+      return { status: "not_found" };
+    }
+
+    await this.telegram.sendPhoto(
+      beforePath,
+      [
+        "[Variational Browser] authenticate button clicked",
+        `selector: ${selector}`,
+        "Approve the WalletConnect SIGN REQUEST from variational-wallet.",
+      ].join("\n"),
+    );
+    await this.page.waitForTimeout(this.config.authenticateWaitMs);
+    const afterPath = await this.captureScreenshot(`authenticate-after-${Date.now()}`);
+    const connected = !(await this.hasVisibleConnectWallet());
+    await this.telegram.sendPhoto(
+      afterPath,
+      connected
+        ? "[Variational Browser] wallet appears connected after authenticate"
+        : "[Variational Browser] wallet still appears disconnected after authenticate",
+    );
+    return { status: connected ? "connected" : "clicked", selector };
   }
 
   async processRequestFile(filePath) {
@@ -430,11 +468,24 @@ class VariationalBrowserGate {
 
   async waitForWalletConnected() {
     const deadline = Date.now() + this.config.connectWaitMs;
+    let authenticateClicked = false;
     while (Date.now() < deadline) {
       await this.page.waitForTimeout(2000);
       if (!(await this.hasVisibleConnectWallet())) {
         await this.page.waitForTimeout(this.config.connectedStableMs);
         return !(await this.hasVisibleConnectWallet());
+      }
+      if (!authenticateClicked) {
+        const selector = await this.clickFirstAvailableOptional(this.config.authenticateSelectors, "authenticate", 1000);
+        if (selector) {
+          authenticateClicked = true;
+          await this.telegram.sendMessage([
+            "[Variational Browser] authenticate/login button clicked",
+            `selector: ${selector}`,
+            "Approve the WalletConnect SIGN REQUEST from variational-wallet, then keep both processes running.",
+          ].join("\n"));
+          await this.page.waitForTimeout(this.config.authenticateWaitMs);
+        }
       }
     }
     return false;
@@ -466,6 +517,20 @@ class VariationalBrowserGate {
       }
     }
     throw new Error(`Could not find ${label}. Tried: ${selectors.join(", ")}`);
+  }
+
+  async clickFirstAvailableOptional(selectors, label, timeoutMs = 3000) {
+    for (const selector of selectors) {
+      const locator = this.page.locator(selector).first();
+      try {
+        await locator.waitFor({ state: "visible", timeout: timeoutMs });
+        await locator.click();
+        return selector;
+      } catch {
+        // Try next selector.
+      }
+    }
+    return "";
   }
 
   async extractWalletConnectUri() {
@@ -563,6 +628,7 @@ function loadConfig() {
     afterClickDelayMs: Number(env("VARIATIONAL_BROWSER_AFTER_CLICK_DELAY_MS", "3000")),
     connectWaitMs: Number(env("VARIATIONAL_BROWSER_CONNECT_WAIT_SEC", "300")) * 1000,
     connectedStableMs: Number(env("VARIATIONAL_BROWSER_CONNECTED_STABLE_MS", "3000")),
+    authenticateWaitMs: Number(env("VARIATIONAL_BROWSER_AUTHENTICATE_WAIT_SEC", "15")) * 1000,
     watchIntervalMs: Number(env("VARIATIONAL_BROWSER_WATCH_INTERVAL_MS", "1000")),
     maxRequestAgeSec: Number(env("VARIATIONAL_BROWSER_MAX_REQUEST_AGE_SEC", "60")),
     viewport: parseViewport(env("VARIATIONAL_BROWSER_VIEWPORT", "1440x1200")),
@@ -582,6 +648,16 @@ function loadConfig() {
       'button:has-text("Copy")',
       '[aria-label*="Copy" i]',
       '[title*="Copy" i]',
+    ]),
+    authenticateSelectors: envList("VARIATIONAL_BROWSER_AUTHENTICATE_SELECTORS", [
+      'button:has-text("Authenticate")',
+      'text=/Authenticate/i',
+      'button:has-text("Sign In")',
+      'text=/Sign In/i',
+      'button:has-text("Log In")',
+      'text=/Log In/i',
+      'button:has-text("Continue")',
+      'button:has-text("Connect Wallet")',
     ]),
     walletConnectUriSelector: env("VARIATIONAL_BROWSER_WC_URI_SELECTOR"),
     telegramToken: requireEnv("VARIATIONAL_BROWSER_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"),
@@ -616,6 +692,7 @@ function parseArgs() {
     daemon: args.includes("--daemon"),
     approveClick: args.includes("--approve-click"),
     connectWallet: args.includes("--connect-wallet"),
+    authenticate: args.includes("--authenticate"),
     request: get("--request"),
     selector: get("--selector"),
     url: get("--url"),
@@ -653,6 +730,8 @@ async function run() {
       await gate.openOnly(args.url || config.url);
     } else if (args.connectWallet) {
       await gate.connectWallet();
+    } else if (args.authenticate) {
+      await gate.authenticateCurrentPage();
     } else if (args.request) {
       await gate.processRequestFile(path.resolve(ROOT, args.request));
     } else if (args.approveClick) {
@@ -663,6 +742,7 @@ async function run() {
       console.log("Usage:");
       console.log("  npm start -- --open");
       console.log("  npm start -- --connect-wallet");
+      console.log("  npm start -- --authenticate");
       console.log("  npm start -- --approve-click --selector 'button:has-text(\"Submit\")'");
       console.log("  npm start -- --request runtime/requests/order.json");
       console.log("  npm start -- --daemon");

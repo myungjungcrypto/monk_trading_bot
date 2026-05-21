@@ -69,6 +69,18 @@ signature must complete before the page stays connected. For this setup, keep
 `VARIATIONAL_WC_DRY_RUN=false` in `tools/variational-wallet/.env` while leaving
 `VARIATIONAL_BROWSER_DRY_RUN=true` for safe click testing.
 
+Some Variational sessions do not send the `authenticate` request automatically.
+In that case the browser clicks an authenticate/login button during
+`--connect-wallet` using `VARIATIONAL_BROWSER_AUTHENTICATE_SELECTORS`. If the
+session is already paired and only auth is missing, run:
+
+```bash
+npm start -- --authenticate
+```
+
+Keep `tools/variational-wallet` running while doing this, then approve the
+WalletConnect `SIGN REQUEST` in Telegram.
+
 The tool first searches the DOM for `wc:` and then clicks a `Copy link` button
 and reads the clipboard. If the URI is not found, send the screenshot; the modal
 may need a custom `VARIATIONAL_BROWSER_WC_URI_SELECTOR` or
