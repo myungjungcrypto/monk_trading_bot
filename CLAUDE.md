@@ -312,7 +312,7 @@ APR 환산:
 - `divergence_threshold_pct`가 0.3% 이하이면 거래 수는 늘지만 1bp 슬리피지만 반영해도 손익이 무너진다.
 - Binance 6개월 기준으로는 `divergence_threshold_pct=1.5`가 가장 보수적이고 품질이 좋다.
 - `zscore_exit_min_pnl_pct=0`은 너무 약하다. 최소 0.05% 순수익 버퍼를 둔다.
-- `min_hold_minutes=120`은 강제 청산 시간이 아니라 Z-score 수렴 청산을 허용하기 전 최소 보유 시간이다. 강제 시간 청산은 `max_hold_hours=12`다.
+- `min_hold_minutes=120`은 강제 청산 시간이 아니라 Z-score 수렴 청산을 허용하기 전 최소 보유 시간이다. 강제 시간 청산은 `max_hold_hours=12`이며, `max_hold_hours <= 0`이면 시간청산을 끈다.
 
 ---
 

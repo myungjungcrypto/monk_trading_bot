@@ -49,6 +49,7 @@ class RiskConfig:
     # 청산 조건
     take_profit_pct: float = 0.8
     stop_loss_pct: float = -3.0
+    # 최대 보유 시간. 0 이하이면 TIMEOUT 청산을 비활성화합니다.
     max_hold_hours: float = 24.0
 
     # 트레일링 스탑
@@ -160,7 +161,7 @@ class RiskManager:
 
         # 6. 최대 보유 시간 초과
         hold_hours = (now - trade.opened_at) / 3600.0
-        if hold_hours >= self.config.max_hold_hours:
+        if self.config.max_hold_hours > 0 and hold_hours >= self.config.max_hold_hours:
             return RiskDecision(
                 action=RiskAction.EXIT,
                 reason=ExitReason.TIMEOUT,

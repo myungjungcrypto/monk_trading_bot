@@ -130,6 +130,16 @@ class TestTimeout:
         decision = rm.evaluate(trade)
         assert decision.action == RiskAction.HOLD
 
+    def test_max_hold_time_disabled(self):
+        rm = RiskManager(RiskConfig(
+            take_profit_pct=5.0,
+            stop_loss_pct=-5.0,
+            max_hold_hours=0.0,
+        ))
+        trade = _make_trade(opened_at=time.time() - 100 * 3600)
+        decision = rm.evaluate(trade)
+        assert decision.action == RiskAction.HOLD
+
 
 class TestZscoreRevert:
     def test_exit_on_revert_with_profit_after_min_hold(self):

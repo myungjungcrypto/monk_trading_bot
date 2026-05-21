@@ -258,7 +258,7 @@ export default function Settings() {
           {numField("Stop Loss %", exit, "stop_loss_pct", setExit)}
           {numField("Z-Score Revert Threshold", exit, "zscore_revert_threshold", setExit)}
           {numField("Min Hold Minutes", exit, "min_hold_minutes", setExit)}
-          {numField("Max Hold Hours", exit, "max_hold_hours", setExit)}
+          {numField("Max Hold Hours (0=off)", exit, "max_hold_hours", setExit)}
           {numField("Z-Score Exit Min PnL %", exit, "zscore_exit_min_pnl_pct", setExit)}
         </div>
       </div>
