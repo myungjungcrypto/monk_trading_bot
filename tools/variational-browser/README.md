@@ -63,6 +63,12 @@ both processes use the same bot token. It waits up to
 `VARIATIONAL_BROWSER_CONNECT_WAIT_SEC` for the dApp to reflect the connected
 wallet, then sends a fresh screenshot.
 
+Do not stop either process after approving only the session. Variational can send
+an additional WalletConnect `SIGN REQUEST` for `authenticate`/login, and that
+signature must complete before the page stays connected. For this setup, keep
+`VARIATIONAL_WC_DRY_RUN=false` in `tools/variational-wallet/.env` while leaving
+`VARIATIONAL_BROWSER_DRY_RUN=true` for safe click testing.
+
 The tool first searches the DOM for `wc:` and then clicks a `Copy link` button
 and reads the clipboard. If the URI is not found, send the screenshot; the modal
 may need a custom `VARIATIONAL_BROWSER_WC_URI_SELECTOR` or

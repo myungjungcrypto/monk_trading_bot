@@ -50,6 +50,12 @@ Or prompt for the URI:
 npm start -- --pair
 ```
 
+Keep this process running until the browser confirms the wallet is connected.
+Variational may send a second `SIGN REQUEST` with an `authenticate` or login
+message after the initial `SESSION REQUEST`. Approve that second request too.
+If `VARIATIONAL_WC_DRY_RUN=true`, the signer intentionally rejects the request
+after approval, so Variational will fall back to `Connect Wallet`.
+
 ## PM2
 
 After a successful manual pairing test:
@@ -70,6 +76,10 @@ Only after the dry-run request summaries match what Variational shows:
 VARIATIONAL_WC_DRY_RUN=false
 ```
 
+For Variational login/authentication, this value must be `false`; otherwise the
+WalletConnect session can be approved but the dApp authentication signature will
+not complete. You can still keep browser order clicks in dry-run mode with
+`VARIATIONAL_BROWSER_DRY_RUN=true`.
+
 Leave `VARIATIONAL_WC_ALLOW_SEND_TRANSACTION=false` unless Variational actually
 uses `eth_sendTransaction` and you have tested it with a tiny balance.
-
