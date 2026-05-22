@@ -225,8 +225,13 @@ python -m backend.scripts.create_variational_browser_request \
   --direction SHORT_BTC_LONG_ETH \
   --action close \
   --legs ETH \
-  --eth-quantity 0.0235
+  --eth-quantity 0.0235 \
+  --approval-timeout-sec 180
 ```
+
+If Telegram approval times out, discard that request and generate a fresh one.
+The approval timeout is stored in each request as `approvalTimeoutMs`, so
+`--approval-timeout-sec` overrides the browser `.env` for that order.
 
 Watch a directory:
 

@@ -39,6 +39,7 @@ def args(**overrides):
         "request_dir": "",
         "steps_json": "",
         "max_age_sec": 300,
+        "approval_timeout_sec": 120,
         "quantity": "",
         "btc_quantity": "",
         "eth_quantity": "",
@@ -70,6 +71,7 @@ def test_build_requests_creates_two_variational_legs():
     btc, eth = requests
     assert btc["url"] == "https://omni.variational.io/perpetual/BTC"
     assert btc["maxAgeSec"] == 300
+    assert btc["approvalTimeoutMs"] == 120_000
     assert btc["confirmSelector"] == "auto"
     assert btc["variationalOrder"] == {
         "symbol": "BTC",

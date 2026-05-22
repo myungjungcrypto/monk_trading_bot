@@ -63,6 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--request-dir", default=str(DEFAULT_REQUEST_DIR))
     parser.add_argument("--steps-json", default="")
     parser.add_argument("--max-age-sec", type=int, default=int(os.getenv("VARIATIONAL_REQUEST_MAX_AGE_SEC", "300")))
+    parser.add_argument("--approval-timeout-sec", type=int, default=int(os.getenv("VARIATIONAL_BROWSER_APPROVAL_TIMEOUT_SEC", "120")))
     parser.add_argument("--quantity", default="")
     parser.add_argument("--btc-quantity", default="")
     parser.add_argument("--eth-quantity", default="")
@@ -114,6 +115,7 @@ def build_requests(args: argparse.Namespace, fair_prices: dict) -> list[dict]:
             "confirmSelector": args.confirm_selector,
             "dryRun": args.dry_run,
             "maxAgeSec": args.max_age_sec,
+            "approvalTimeoutMs": args.approval_timeout_sec * 1000,
             "steps": steps,
             "variationalOrder": {
                 "symbol": symbol,

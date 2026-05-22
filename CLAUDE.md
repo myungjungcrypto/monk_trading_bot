@@ -679,7 +679,7 @@ python -m backend.scripts.create_variational_browser_request \
 - `LONG_BTC_SHORT_ETH` → BTC Buy 요청 + ETH Sell 요청
 - `SHORT_BTC_LONG_ETH` → BTC Sell 요청 + ETH Buy 요청
 
-각 요청의 `variationalOrder.quantity`는 Binance/Lighter/Hyperliquid median fair price 기준으로 `size_usd / fair_price`를 계산한다. 기본값은 dry-run이고, 두 다리를 텔레그램으로 순차 승인할 수 있도록 생성 요청에는 기본 `maxAgeSec=300`을 넣는다. 값은 `VARIATIONAL_REQUEST_MAX_AGE_SEC` 또는 `--max-age-sec`로 조정한다.
+각 요청의 `variationalOrder.quantity`는 Binance/Lighter/Hyperliquid median fair price 기준으로 `size_usd / fair_price`를 계산한다. 기본값은 dry-run이고, 두 다리를 텔레그램으로 순차 승인할 수 있도록 생성 요청에는 기본 `maxAgeSec=300`, `approvalTimeoutMs=120000`을 넣는다. 요청 유효 시간은 `VARIATIONAL_REQUEST_MAX_AGE_SEC` 또는 `--max-age-sec`, 텔레그램 승인 대기 시간은 `VARIATIONAL_BROWSER_APPROVAL_TIMEOUT_SEC` 또는 `--approval-timeout-sec`로 조정한다.
 
 청산 요청은 원래 진입 방향을 기준으로 `--action close`를 붙인다. 이때 스크립트가 다리 방향을 자동 반전하고 `reduceOnly=true`를 넣는다. 실제 포지션 수량과 정확히 맞추려면 `--btc-quantity` / `--eth-quantity`를 사용한다.
 
@@ -688,7 +688,8 @@ python -m backend.scripts.create_variational_browser_request \
   --direction SHORT_BTC_LONG_ETH \
   --action close \
   --legs ETH \
-  --eth-quantity 0.0235
+  --eth-quantity 0.0235 \
+  --approval-timeout-sec 180
 ```
 
 단일 다리 selector만 테스트할 때:
