@@ -720,6 +720,7 @@ python -m backend.scripts.create_variational_browser_request \
 - Browser gate는 `variationalOrder`가 있으면 symbol 페이지 이동 → Market 탭 → Buy/Sell 선택 → Size 입력 → 스크린샷 승인 순서로 처리한다.
 - `variationalOrder.reduceOnly=true`이면 Reduce Only 체크박스를 켠 뒤 Size를 입력한다.
 - 새 요청의 기본 `confirmSelector`는 `auto`다. Browser gate는 주문 패널 영역의 활성 버튼 후보를 텔레그램 메시지에 표시하고, broad selector(`body`, `html`, `*`)는 live click에서 차단한다.
+- `VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY=true`이면 `action=close` + `reduceOnly=true` 요청은 텔레그램 승인 없이 자동 클릭한다. 오픈 요청은 계속 텔레그램 승인을 요구한다.
 
 자동 봇 연동:
 - `EXECUTION_MODE=variational_browser`이면 BotEngine은 실제 거래소 API 주문을 넣지 않고, `variational_browser` 가상 포지션으로 PnL/DB를 추적한다.
@@ -778,6 +779,7 @@ npm start -- --connect-wallet
 - `confirmSelector=auto`가 기본값이며, Telegram 메시지에 `confirm_button_candidates`를 표시한다. broad selector live click은 차단한다.
 - 진입 요청은 양다리로 생성된다. `LONG_BTC_SHORT_ETH`는 BTC Buy + ETH Sell, `SHORT_BTC_LONG_ETH`는 BTC Sell + ETH Buy다.
 - 청산 요청은 원래 방향을 반전하고 `reduceOnly=true`를 사용한다. BotEngine 연동 청산은 가상 포지션에 저장된 실제 BTC/ETH 수량을 사용한다.
+- 청산 요청은 `VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY=true` 기본값에서 자동 클릭된다. 이 경로는 `action=close`와 `reduceOnly=true`를 모두 만족할 때만 작동하며, pre/post screenshot은 텔레그램으로 남긴다. `VARIATIONAL_BROWSER_DRY_RUN=true`이면 자동 경로에서도 클릭하지 않는다.
 - BotEngine은 이제 browser request가 `.clicked.done`으로 archive된 것을 확인한 뒤에만 가상 포지션/DB 오픈을 기록한다.
 - Browser daemon이 꺼져 있거나 Telegram 승인 timeout/거절/dry-run/실패가 발생하면 request는 `.aborted.done` 또는 해당 상태로 archive되고, 프론트엔드/DB 포지션은 열리지 않는다.
 - 청산도 동일하게 `.clicked.done` 확인 후에만 가상 포지션을 닫는다. 실패하면 프론트엔드 포지션을 유지해 실제 Variational 포지션과 어긋나는 것을 막는다.
@@ -818,6 +820,7 @@ Warmup complete from binance: ...
 VARIATIONAL_BROWSER_COMPLETION_TIMEOUT_SEC=360
 VARIATIONAL_BROWSER_COMPLETION_POLL_SEC=1
 VARIATIONAL_BROWSER_RECONCILE_WINDOW_SEC=600
+VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY=true
 BOT_CONFIG_RELOAD_INTERVAL_SEC=15
 ```
 
@@ -836,7 +839,9 @@ The trading signal engine still runs server-side. It receives live BTC/ETH price
 
 When the bot wants to trade on Variational, it does not send an order to an exchange API. Instead, it writes a local request file describing the intended leg: symbol, side, quantity, reduce-only flag, fair price snapshot, and expiration time. A separate Playwright browser process watches this request directory. That browser keeps a persistent Variational web session open on the EC2 instance.
 
-For each request, the browser opens the correct Variational market page, selects Market order mode, chooses Buy or Sell, fills the size field, optionally enables Reduce Only, and then captures a screenshot of the prepared order panel. Before it clicks anything, it sends the screenshot and order details to Telegram. The human operator must approve the action from Telegram within the timeout window. Only after approval does the browser click the detected final order button. If the request is rejected or times out, no click is made.
+For each open request, the browser opens the correct Variational market page, selects Market order mode, chooses Buy or Sell, fills the size field, and then captures a screenshot of the prepared order panel. Before it opens new exposure, it sends the screenshot and order details to Telegram. The human operator must approve the action from Telegram within the timeout window. Only after approval does the browser click the detected final order button. If the request is rejected or times out, no click is made.
+
+Close requests are different. They are generated as reduce-only orders with the exact tracked quantities. Because they reduce exposure rather than create new exposure, the browser can auto-click them when `VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY=true`, `action=close`, and `reduceOnly=true`. The browser still sends pre-click and post-click screenshots to Telegram for audit, and dry-run mode still skips the click.
 
 WalletConnect is used only to keep the Variational web session authenticated. In our testing, Variational did not require a new wallet signature for every order after the web session was authenticated. Because of that, the key approval point for each trade is the Telegram-controlled final browser click, not a per-order blockchain signature.
 

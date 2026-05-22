@@ -10,9 +10,12 @@ Default behavior is safe:
 
 - `VARIATIONAL_BROWSER_DRY_RUN=true`: Telegram approval is requested, but the
   final click is skipped.
+- `VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY=true`: close requests that are
+  explicitly `action=close` and `reduceOnly=true` are auto-clicked in live mode
+  because they reduce exposure. Open requests still require Telegram approval.
 - Persistent browser profile: login/session state is kept under
   `tools/variational-browser/runtime/profile`.
-- Screenshot before every approval.
+- Screenshot before every approval or automatic reduce-only click.
 - Telegram allowlist and kill switch.
 
 ## Install
@@ -183,6 +186,17 @@ the Reduce Only checkbox before filling size. If the selector is not found, it
 falls back to `VARIATIONAL_BROWSER_REDUCE_ONLY_FALLBACK_POINT`; verify the
 checkbox in the dry-run screenshot before any live close click.
 
+In live mode, close requests are auto-clicked without waiting for Telegram when
+all of the following are true:
+
+- `VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY=true`
+- `variationalOrder.action` is `close`
+- `variationalOrder.reduceOnly` is `true`
+
+The browser still sends pre-click and post-click screenshots for audit. If
+`VARIATIONAL_BROWSER_DRY_RUN=true`, the auto reduce-only path reports dry-run
+and skips the click.
+
 With `confirmSelector: "auto"`, the approval caption lists enabled final-button
 candidates from the order panel area. Live mode refuses broad selectors such as
 `body`, `html`, or `*`; either keep `auto` or provide a precise button selector.
@@ -251,7 +265,9 @@ With that mode, BotEngine keeps virtual PnL/DB state under the
 `variational_browser` exchange name and writes open/close request files
 automatically. Keep the browser daemon running so those files are converted into
 Telegram approval screenshots. Close requests are reduce-only and use the
-tracked virtual leg quantities.
+tracked virtual leg quantities. If `VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY`
+is enabled, those close requests are clicked automatically after setup because
+they only reduce exposure.
 
 The daemon archives processed request files as `*.done`. Expired or malformed
 requests are archived as `*.expired.done` / `*.failed.done` so an old file cannot

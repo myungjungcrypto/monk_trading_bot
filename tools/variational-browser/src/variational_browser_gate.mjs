@@ -442,6 +442,7 @@ class VariationalBrowserGate {
       "[Variational Browser] request watcher started",
       `dir: ${this.config.requestDir}`,
       `dry_run: ${this.config.dryRun}`,
+      `auto_click_reduce_only: ${this.config.autoClickReduceOnly}`,
     ].join("\n"));
 
     while (true) {
@@ -523,6 +524,29 @@ class VariationalBrowserGate {
       return [];
     });
     const body = this.buildApprovalBody(request, screenshotPath, confirmCandidates);
+    const autoReduceOnly = this.shouldAutoClickReduceOnly(request);
+    const dryRun = request.dryRun ?? this.config.dryRun;
+
+    if (autoReduceOnly) {
+      await this.telegram.sendPhoto(
+        screenshotPath,
+        this.buildAutoReduceOnlyCaption(request, confirmCandidates),
+      );
+      if (dryRun) {
+        await this.telegram.sendMessage(`[Variational Browser] reduce-only dry-run, click skipped\nid: ${request.id}`);
+        console.log("[Variational Browser] reduce-only dry-run, click skipped");
+        return { status: "dryrun" };
+      }
+
+      console.log("[Variational Browser] auto-clicking reduce-only close request...");
+      await this.clickConfirm(request, confirmCandidates);
+      await this.page.waitForTimeout(Number(request.afterClickDelayMs ?? this.config.afterClickDelayMs));
+      const afterPath = await this.captureScreenshot(`${request.id || "request"}-after`);
+      await this.telegram.sendPhoto(afterPath, `[Variational Browser] reduce-only clicked\nid: ${request.id}`);
+      console.log("[Variational Browser] reduce-only final click completed");
+      return { status: "clicked" };
+    }
+
     console.log("[Variational Browser] sending Telegram approval request...");
     const decision = await this.telegram.requestApproval({
       title: "[Variational Browser] ORDER CLICK REQUEST",
@@ -539,7 +563,7 @@ class VariationalBrowserGate {
       return { status: "rejected", reason: decision.reason };
     }
 
-    if (request.dryRun ?? this.config.dryRun) {
+    if (dryRun) {
       await this.telegram.sendMessage(`[Variational Browser] dry-run approved, click skipped\nid: ${request.id}`);
       console.log("[Variational Browser] dry-run approved, click skipped");
       return { status: "dryrun" };
@@ -568,6 +592,15 @@ class VariationalBrowserGate {
     if (!dryRun && isUnsafeConfirmSelector(selector)) {
       throw new Error(`Unsafe confirmSelector for live click: ${selector}`);
     }
+  }
+
+  shouldAutoClickReduceOnly(request) {
+    if (!this.config.autoClickReduceOnly) return false;
+    if (request.autoClickReduceOnly === false) return false;
+
+    const order = request.variationalOrder || {};
+    const action = String(order.action || request.signal?.action || "").toLowerCase();
+    return action === "close" && order.reduceOnly === true;
   }
 
   async setupVariationalOrder(order) {
@@ -1075,6 +1108,32 @@ class VariationalBrowserGate {
     lines.push("", `screenshot: ${screenshotPath}`);
     return lines.join("\n").slice(0, 3500);
   }
+
+  buildAutoReduceOnlyCaption(request, confirmCandidates = []) {
+    const order = request.variationalOrder || {};
+    const lines = [
+      "[Variational Browser] AUTO REDUCE-ONLY CLICK",
+      `id: ${request.id || ""}`,
+      `url: ${this.page.url()}`,
+      `dry_run: ${request.dryRun ?? this.config.dryRun}`,
+      `leg: ${order.symbol || ""} ${order.side || ""}`,
+      `quantity: ${order.quantity || ""}`,
+      `reduce_only: ${order.reduceOnly === true}`,
+      "",
+      request.summary || "No summary provided.",
+    ];
+    if (confirmCandidates.length) {
+      const candidate = confirmCandidates.find((item) => !item.disabled) || confirmCandidates[0];
+      lines.push(
+        "",
+        "confirm_button_candidate:",
+        `#${candidate.index} score=${candidate.score} disabled=${candidate.disabled} text="${candidate.text}" box=${candidate.x},${candidate.y},${candidate.width}x${candidate.height}`,
+      );
+    } else {
+      lines.push("", "confirm_button_candidates: none");
+    }
+    return lines.join("\n").slice(0, 1024);
+  }
 }
 
 function loadConfig() {
@@ -1089,6 +1148,7 @@ function loadConfig() {
     confirmSelector: env("VARIATIONAL_BROWSER_CONFIRM_SELECTOR", "auto"),
     headless: envBool("VARIATIONAL_BROWSER_HEADLESS", true),
     dryRun: envBool("VARIATIONAL_BROWSER_DRY_RUN", true),
+    autoClickReduceOnly: envBool("VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY", true),
     approvalTimeoutMs: Number(env("VARIATIONAL_BROWSER_APPROVAL_TIMEOUT_SEC", "45")) * 1000,
     actionTimeoutMs: Number(env("VARIATIONAL_BROWSER_ACTION_TIMEOUT_SEC", "15000")),
     previewDelayMs: Number(env("VARIATIONAL_BROWSER_PREVIEW_DELAY_MS", "1000")),
