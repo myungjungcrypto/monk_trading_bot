@@ -776,6 +776,10 @@ npm start -- --connect-wallet
 - `confirmSelector=auto`가 기본값이며, Telegram 메시지에 `confirm_button_candidates`를 표시한다. broad selector live click은 차단한다.
 - 진입 요청은 양다리로 생성된다. `LONG_BTC_SHORT_ETH`는 BTC Buy + ETH Sell, `SHORT_BTC_LONG_ETH`는 BTC Sell + ETH Buy다.
 - 청산 요청은 원래 방향을 반전하고 `reduceOnly=true`를 사용한다. BotEngine 연동 청산은 가상 포지션에 저장된 실제 BTC/ETH 수량을 사용한다.
+- BotEngine은 이제 browser request가 `.clicked.done`으로 archive된 것을 확인한 뒤에만 가상 포지션/DB 오픈을 기록한다.
+- Browser daemon이 꺼져 있거나 Telegram 승인 timeout/거절/dry-run/실패가 발생하면 request는 `.aborted.done` 또는 해당 상태로 archive되고, 프론트엔드/DB 포지션은 열리지 않는다.
+- 청산도 동일하게 `.clicked.done` 확인 후에만 가상 포지션을 닫는다. 실패하면 프론트엔드 포지션을 유지해 실제 Variational 포지션과 어긋나는 것을 막는다.
+- 재시작 시 과거 `variational_browser` DB open trade 주변의 open request 파일을 확인한다. BTC/ETH 양쪽 모두 `clicked`가 아니면 `UNCONFIRMED_BROWSER_REQUEST`로 자동 종료 처리해, browser가 꺼진 상태에서 생긴 프론트엔드 전용 가상 포지션을 정리한다.
 - request watcher는 `npm start -- --daemon`으로 실행하며, 만료/실패 파일은 `.expired.done` 또는 `.failed.done`으로 archive해 무한 재처리를 막는다.
 - 외부 공정가는 Binance, Lighter, Hyperliquid 중 살아 있는 소스의 median을 사용한다. Variational 화면 가격은 주문 UI 확인용이며 신호 기준가로 쓰지 않는다.
 - Lighter REST kline 403 문제 때문에 startup warmup은 Binance Futures klines를 우선 사용한다.
@@ -805,9 +809,17 @@ Warmup complete from binance: ...
 [Variational Browser] request watcher started
 ```
 
+관련 안전 설정:
+
+```env
+VARIATIONAL_BROWSER_COMPLETION_TIMEOUT_SEC=360
+VARIATIONAL_BROWSER_COMPLETION_POLL_SEC=1
+VARIATIONAL_BROWSER_RECONCILE_WINDOW_SEC=600
+```
+
 남은 주의점:
 
-- Telegram 승인 timeout, 거절, 사용자의 수동 kill switch, 웹 UI 변경이 있으면 대시보드 가상 포지션과 실제 Variational 포지션이 어긋날 수 있다.
+- Telegram 승인 timeout, 거절, browser daemon 중단은 자동 방어한다. 다만 사용자가 Variational 웹에서 직접 주문/청산하거나, UI 변경으로 잘못된 버튼 후보가 탐지되면 대시보드 가상 포지션과 실제 Variational 포지션이 어긋날 수 있다.
 - 따라서 live 테스트는 계속 소액으로 진행하고, Telegram screenshot의 `symbol`, `side`, `quantity`, `reduceOnly`, `confirm_button_candidates`를 확인해야 한다.
 - `tools/variational-wallet`과 `tools/variational-browser`가 같은 Telegram bot token으로 동시에 polling하면 callback을 서로 가져갈 수 있다. 가능하면 브라우저 승인용 bot token을 분리한다.
 - Variational 공식 trading API가 생기면 browser click gate는 제거하고 API execution adapter로 교체하는 것이 최종 목표다.

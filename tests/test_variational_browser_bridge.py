@@ -8,6 +8,7 @@ from backend.bot.position_manager import LegInfo, PairDirection, PairTrade
 from backend.bot.variational.browser_requests import (
     VariationalBrowserRequestBridge,
     VariationalBrowserRequestConfig,
+    completions_all_clicked,
     request_quantity,
 )
 
@@ -37,6 +38,8 @@ def config(tmp_path):
         request_dir=tmp_path,
         dry_run=True,
         approval_timeout_sec=180,
+        completion_timeout_sec=1,
+        completion_poll_sec=0.1,
     )
 
 
@@ -99,5 +102,41 @@ def test_bridge_writes_reduce_only_close_requests(tmp_path):
         assert eth["variationalOrder"]["side"] == "SELL"
         assert eth["variationalOrder"]["quantity"] == "0.0235"
         assert eth["variationalOrder"]["reduceOnly"] is True
+
+    asyncio.run(run())
+
+
+def test_wait_for_batch_completion_requires_clicked_archives(tmp_path):
+    async def run():
+        bridge = VariationalBrowserRequestBridge(config(tmp_path), FakeOracle())
+        batch = await bridge.create_entry_requests(
+            direction=PairDirection.LONG_BTC_SHORT_ETH,
+            size_usd=50,
+        )
+        for path in batch.paths:
+            path.rename(f"{path}.clicked.done")
+
+        completions = await bridge.wait_for_batch_completion(batch, timeout_sec=1)
+
+        assert completions_all_clicked(completions)
+        assert {completion.status for completion in completions} == {"clicked"}
+
+    asyncio.run(run())
+
+
+def test_wait_for_batch_completion_aborts_unprocessed_requests(tmp_path):
+    async def run():
+        bridge = VariationalBrowserRequestBridge(config(tmp_path), FakeOracle())
+        batch = await bridge.create_entry_requests(
+            direction=PairDirection.LONG_BTC_SHORT_ETH,
+            size_usd=50,
+        )
+
+        completions = await bridge.wait_for_batch_completion(batch, timeout_sec=1)
+
+        assert not completions_all_clicked(completions)
+        assert {completion.status for completion in completions} == {"aborted"}
+        assert all(not path.exists() for path in batch.paths)
+        assert all((tmp_path / f"{path.name}.aborted.done").exists() for path in batch.paths)
 
     asyncio.run(run())

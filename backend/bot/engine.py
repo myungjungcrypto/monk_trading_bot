@@ -39,6 +39,8 @@ from backend.bot.trade_recorder import TradeRecorder
 from backend.bot.variational.browser_requests import (
     VariationalBrowserRequestBatch,
     VariationalBrowserRequestBridge,
+    completions_all_clicked,
+    format_completions,
     request_quantity,
 )
 from backend.bot.warmup import warmup
@@ -185,6 +187,11 @@ class BotEngine:
         if not db_trades:
             return
 
+        if self.execution_mode == EXECUTION_VARIATIONAL_BROWSER:
+            db_trades = await self._reconcile_variational_browser_trades(db_trades)
+            if not db_trades:
+                return
+
         if self._uses_virtual_positions:
             restored = self._restore_virtual_trades(db_trades)
         else:
@@ -192,6 +199,53 @@ class BotEngine:
 
         if restored and self.telegram:
             await self.telegram.status(f"Restored {restored} open trade(s) after restart")
+
+    async def _reconcile_variational_browser_trades(self, db_trades: List[object]) -> List[object]:
+        """Do not restore browser trades whose UI clicks were never confirmed."""
+        if self.variational_bridge is None or self.trade_recorder is None:
+            return db_trades
+
+        window_sec = int(os.getenv("VARIATIONAL_BROWSER_RECONCILE_WINDOW_SEC", "600"))
+        confirmed: List[object] = []
+        for db_trade in db_trades:
+            try:
+                direction = PairDirection(db_trade.direction)
+            except ValueError:
+                confirmed.append(db_trade)
+                continue
+
+            statuses = self.variational_bridge.open_request_statuses_for_trade(
+                direction=direction,
+                opened_at=db_trade.opened_at,
+                window_sec=window_sec,
+            )
+            if not statuses:
+                confirmed.append(db_trade)
+                continue
+
+            if statuses.get("BTC") == "clicked" and statuses.get("ETH") == "clicked":
+                confirmed.append(db_trade)
+                continue
+
+            detail = ", ".join(f"{symbol}={status}" for symbol, status in sorted(statuses.items()))
+            logger.warning(
+                "Closing unconfirmed Variational browser DB trade id=%s: %s",
+                db_trade.id, detail,
+            )
+            await self.trade_recorder.mark_open_trade_unconfirmed(
+                db_trade.id,
+                "UNCONFIRMED_BROWSER_REQUEST",
+            )
+            if self.telegram:
+                await self.telegram.status(
+                    "\n".join([
+                        "Cleared unconfirmed Variational browser position",
+                        f"db_trade_id: {db_trade.id}",
+                        f"statuses: {detail}",
+                    ])
+                )
+
+        return confirmed
 
     def _restore_virtual_trades(self, db_trades: List[object]) -> int:
         restored = 0
@@ -550,6 +604,8 @@ class BotEngine:
                     divergence_pct=signal.divergence_pct,
                 )
                 await self._notify_variational_requests("entry", variational_entry_batch)
+                if not await self._await_variational_browser_execution("entry", variational_entry_batch):
+                    return
             except Exception as e:
                 logger.error("Failed to create Variational entry requests: %s", e, exc_info=True)
                 if self.telegram:
@@ -638,6 +694,8 @@ class BotEngine:
                         reason=reason.value,
                     )
                     await self._notify_variational_requests("close", close_batch)
+                    if not await self._await_variational_browser_execution("close", close_batch):
+                        return
                 except Exception as e:
                     logger.error("Failed to create Variational close requests: %s", e, exc_info=True)
                     if self.telegram:
@@ -714,6 +772,38 @@ class BotEngine:
                 "Run tools/variational-browser daemon to process them.",
             ])
         )
+
+    async def _await_variational_browser_execution(
+        self,
+        label: str,
+        batch: VariationalBrowserRequestBatch,
+    ) -> bool:
+        if self.variational_bridge is None:
+            return True
+
+        completions = await self.variational_bridge.wait_for_batch_completion(batch)
+        summary = format_completions(completions)
+        if completions_all_clicked(completions):
+            logger.info("Variational Browser %s clicks confirmed:\n%s", label, summary)
+            if self.telegram:
+                await self.telegram.status(
+                    "\n".join([
+                        f"Variational Browser {label} clicks confirmed",
+                        summary,
+                    ])
+                )
+            return True
+
+        logger.warning("Variational Browser %s not executed:\n%s", label, summary)
+        if self.telegram:
+            await self.telegram.error(
+                f"Variational Browser {label} not executed",
+                "\n".join([
+                    summary,
+                    "Virtual/DB position was not changed.",
+                ]),
+            )
+        return False
 
     # ── 리스크 액션 처리 ─────────────────────────────────────
 

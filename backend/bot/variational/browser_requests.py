@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import json
 import os
+import asyncio
+import time
 from argparse import Namespace
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from backend.bot.fair_price import FairPriceOracle
 from backend.bot.position_manager import PairDirection, PairTrade
@@ -31,6 +34,8 @@ class VariationalBrowserRequestConfig:
     dry_run: bool = True
     max_age_sec: int = 300
     approval_timeout_sec: int = 120
+    completion_timeout_sec: int = 360
+    completion_poll_sec: float = 1.0
     legs: str = "both"
     btc_qty_decimals: int = 6
     eth_qty_decimals: int = 4
@@ -47,6 +52,8 @@ class VariationalBrowserRequestConfig:
             dry_run=env_bool("VARIATIONAL_BROWSER_DRY_RUN", True),
             max_age_sec=int(os.getenv("VARIATIONAL_REQUEST_MAX_AGE_SEC", "300")),
             approval_timeout_sec=int(os.getenv("VARIATIONAL_BROWSER_APPROVAL_TIMEOUT_SEC", "120")),
+            completion_timeout_sec=int(os.getenv("VARIATIONAL_BROWSER_COMPLETION_TIMEOUT_SEC", "360")),
+            completion_poll_sec=float(os.getenv("VARIATIONAL_BROWSER_COMPLETION_POLL_SEC", "1")),
             legs=os.getenv("VARIATIONAL_BROWSER_ENGINE_LEGS", "both"),
             btc_qty_decimals=int(os.getenv("VARIATIONAL_BROWSER_BTC_QTY_DECIMALS", "6")),
             eth_qty_decimals=int(os.getenv("VARIATIONAL_BROWSER_ETH_QTY_DECIMALS", "4")),
@@ -58,6 +65,13 @@ class VariationalBrowserRequestBatch:
     action: str
     paths: List[Path]
     requests: List[dict]
+
+
+@dataclass(frozen=True)
+class VariationalBrowserRequestCompletion:
+    path: Path
+    status: str
+    done_path: Optional[Path] = None
 
 
 class VariationalBrowserRequestBridge:
@@ -160,6 +174,83 @@ class VariationalBrowserRequestBridge:
             paths.append(path)
         return paths
 
+    async def wait_for_batch_completion(
+        self,
+        batch: VariationalBrowserRequestBatch,
+        *,
+        timeout_sec: Optional[int] = None,
+    ) -> List[VariationalBrowserRequestCompletion]:
+        """Wait until the browser daemon archives every request file."""
+        if timeout_sec is None:
+            request_timeout = sum(
+                float(request.get("approvalTimeoutMs", self.config.approval_timeout_sec * 1000)) / 1000
+                for request in batch.requests
+            ) + 60
+            timeout = max(self.config.completion_timeout_sec, int(request_timeout))
+        else:
+            timeout = timeout_sec
+        deadline = time.monotonic() + max(timeout, 0)
+        pending = set(batch.paths)
+        completions: List[VariationalBrowserRequestCompletion] = []
+
+        while pending and time.monotonic() <= deadline:
+            for path in list(pending):
+                completion = request_completion(path)
+                if completion is None:
+                    continue
+                completions.append(completion)
+                pending.remove(path)
+            if pending:
+                await asyncio.sleep(max(self.config.completion_poll_sec, 0.1))
+
+        for path in sorted(pending):
+            completion = request_completion(path)
+            if completion is not None:
+                completions.append(completion)
+                continue
+            aborted = abort_pending_request(path)
+            completions.append(aborted)
+        return completions
+
+    def open_request_statuses_for_trade(
+        self,
+        *,
+        direction: PairDirection,
+        opened_at: object,
+        window_sec: int = 600,
+    ) -> Dict[str, str]:
+        """Find archived/pending open request statuses near a DB trade timestamp."""
+        opened_ts = _to_timestamp(opened_at)
+        if opened_ts <= 0 or not self.config.request_dir.exists():
+            return {}
+
+        statuses: Dict[str, str] = {}
+        for path in self.config.request_dir.glob("*.json*"):
+            if path.is_dir():
+                continue
+            try:
+                request = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+
+            order = request.get("variationalOrder") or {}
+            if str(order.get("action", "open")).lower() != "open":
+                continue
+            pair_direction = order.get("pairDirection") or request.get("signal", {}).get("direction")
+            if str(pair_direction) != direction.value:
+                continue
+
+            created_ts = _to_timestamp(request.get("createdAt"))
+            if created_ts <= 0 or abs(opened_ts - created_ts) > window_sec:
+                continue
+
+            symbol = str(order.get("symbol", "")).upper()
+            if symbol not in {"BTC", "ETH"}:
+                continue
+            statuses[symbol] = request_file_status(path)
+
+        return statuses
+
 
 def request_quantity(batch: Optional[VariationalBrowserRequestBatch], symbol: str) -> Optional[float]:
     if batch is None:
@@ -187,3 +278,71 @@ def _project_path(value: str) -> Path:
     if path.is_absolute():
         return path
     return ROOT / path
+
+
+def request_completion(path: Path) -> Optional[VariationalBrowserRequestCompletion]:
+    if path.exists():
+        return None
+    done_files = sorted(path.parent.glob(f"{path.name}.*.done"))
+    if not done_files:
+        return None
+    done_path = done_files[-1]
+    return VariationalBrowserRequestCompletion(
+        path=path,
+        status=request_file_status(done_path),
+        done_path=done_path,
+    )
+
+
+def abort_pending_request(path: Path) -> VariationalBrowserRequestCompletion:
+    done_path = Path(f"{path}.aborted.done")
+    try:
+        path.rename(done_path)
+        return VariationalBrowserRequestCompletion(path=path, status="aborted", done_path=done_path)
+    except FileNotFoundError:
+        completion = request_completion(path)
+        if completion is not None:
+            return completion
+    except OSError:
+        pass
+    return VariationalBrowserRequestCompletion(path=path, status="pending_timeout")
+
+
+def request_file_status(path: Path) -> str:
+    name = path.name
+    if name.endswith(".done"):
+        marker = name.removesuffix(".done").rsplit(".", 1)[-1]
+        return marker or "unknown"
+    if name.endswith(".json"):
+        return "pending"
+    return "unknown"
+
+
+def completions_all_clicked(completions: List[VariationalBrowserRequestCompletion]) -> bool:
+    return bool(completions) and all(completion.status == "clicked" for completion in completions)
+
+
+def format_completions(completions: List[VariationalBrowserRequestCompletion]) -> str:
+    return "\n".join(
+        f"{completion.path.name}: {completion.status}"
+        for completion in completions
+    )
+
+
+def _to_timestamp(value: object) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.timestamp()
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return _to_timestamp(parsed)
+        except ValueError:
+            return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0

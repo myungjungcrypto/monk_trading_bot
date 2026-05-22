@@ -94,6 +94,30 @@ class TradeRecorder:
             logger.error("Failed to record trade close: %s", e)
             return False
 
+    async def mark_open_trade_unconfirmed(self, db_trade_id: int, reason: str) -> bool:
+        """Mark a DB-open trade closed when browser execution was not confirmed."""
+        try:
+            async with self._session_factory() as db:
+                db_trade = await db.get(Trade, db_trade_id)
+                if db_trade is None:
+                    logger.warning("DB trade not found: id=%d", db_trade_id)
+                    return False
+                if db_trade.closed_at is not None:
+                    return True
+
+                db_trade.closed_at = datetime.now(timezone.utc)
+                db_trade.pnl_usd = db_trade.pnl_usd or 0.0
+                db_trade.net_pnl_usd = db_trade.net_pnl_usd or 0.0
+                db_trade.exit_reason = reason
+                await db.flush()
+                await self._record_pnl_snapshot(db, open_positions=0)
+                await db.commit()
+                logger.info("Unconfirmed browser trade closed in DB: id=%d reason=%s", db_trade_id, reason)
+                return True
+        except Exception as e:
+            logger.error("Failed to mark unconfirmed trade closed: %s", e)
+            return False
+
     async def record_full(self, trade: PairTrade, exit_reason: str, signal_mode: str = "scalp") -> Optional[int]:
         """이미 닫힌 거래를 한 번에 기록합니다 (로그 복구용)."""
         try:
