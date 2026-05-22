@@ -6,6 +6,7 @@ import pytest
 from backend.bot.fair_price import FairPrice, SourcePrice
 from backend.scripts.create_variational_browser_request import (
     build_requests,
+    env_bool,
     format_quantity,
     normalize_base_url,
     selected_legs,
@@ -102,3 +103,10 @@ def test_format_quantity_keeps_nonzero_small_values():
         format_quantity(0.00000049, 6)
     with pytest.raises(SystemExit):
         format_quantity(0, 6)
+
+
+def test_env_bool_parses_live_click_flags(monkeypatch):
+    monkeypatch.setenv("VARIATIONAL_BROWSER_DRY_RUN", "false")
+    assert env_bool("VARIATIONAL_BROWSER_DRY_RUN", True) is False
+    monkeypatch.setenv("VARIATIONAL_BROWSER_DRY_RUN", "true")
+    assert env_bool("VARIATIONAL_BROWSER_DRY_RUN", False) is True

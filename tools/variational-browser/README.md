@@ -33,6 +33,9 @@ bot token can steal each other's button clicks.
 Values in `tools/variational-browser/.env` override the shared `backend/.env`.
 Use the tool-local file for live-click controls such as
 `VARIATIONAL_BROWSER_DRY_RUN=false`.
+The request generator also loads both files in the same order, so generated
+JSON requests inherit the tool-local dry-run setting unless you pass
+`--dry-run` or `--no-dry-run` explicitly.
 
 ## First Session Setup
 

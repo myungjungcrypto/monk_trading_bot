@@ -16,10 +16,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from dotenv import load_dotenv
+
 from backend.bot.fair_price import FairPriceOracle
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_REQUEST_DIR = ROOT / "tools" / "variational-browser" / "runtime" / "requests"
+VARIATIONAL_BROWSER_DIR = ROOT / "tools" / "variational-browser"
+DEFAULT_REQUEST_DIR = VARIATIONAL_BROWSER_DIR / "runtime" / "requests"
+
+load_dotenv(ROOT / "backend" / ".env")
+load_dotenv(VARIATIONAL_BROWSER_DIR / ".env", override=True)
 
 
 async def main() -> None:
@@ -52,7 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", default=os.getenv("VARIATIONAL_BROWSER_BASE_URL", os.getenv("VARIATIONAL_BROWSER_URL", "https://omni.variational.io")))
     parser.add_argument("--legs", choices=["both", "BTC", "ETH"], default="both")
     parser.add_argument("--confirm-selector", default=os.getenv("VARIATIONAL_BROWSER_CONFIRM_SELECTOR", "auto"))
-    parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=env_bool("VARIATIONAL_BROWSER_DRY_RUN", True))
     parser.add_argument("--request-dir", default=str(DEFAULT_REQUEST_DIR))
     parser.add_argument("--steps-json", default="")
     parser.add_argument("--max-age-sec", type=int, default=int(os.getenv("VARIATIONAL_REQUEST_MAX_AGE_SEC", "300")))
@@ -130,6 +136,13 @@ def selected_legs(direction: str, legs_arg: str) -> list[tuple[str, str]]:
     if legs_arg == "both":
         return mapping
     return [leg for leg in mapping if leg[0] == legs_arg]
+
+
+def env_bool(name: str, fallback: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return fallback
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def normalize_base_url(value: str) -> str:
