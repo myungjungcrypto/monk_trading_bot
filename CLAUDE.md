@@ -726,7 +726,9 @@ python -m backend.scripts.create_variational_browser_request \
 - 진입 신호가 나면 `backend.bot.variational.browser_requests.VariationalBrowserRequestBridge`가 BTC/ETH 두 다리 요청 파일을 자동 생성한다.
 - 청산 신호가 나면 기존 가상 포지션의 실제 추적 수량으로 `--action close`와 같은 reduce-only 청산 요청 파일을 자동 생성한다.
 - 요청 파일은 `VARIATIONAL_BROWSER_REQUEST_DIR` 아래에 저장되며, `tools/variational-browser`를 `npm start -- --daemon`으로 켜두면 순차 처리된다.
-- 브라우저 요청 생성 실패 시 가상 포지션을 열거나 닫지 않는다. 요청 생성 이후 텔레그램에서 사용자가 거절하거나 timeout이 나면 대시보드 상태와 실제 Variational 포지션이 달라질 수 있으므로, 운영자는 스크린샷 승인/거절을 신중히 처리해야 한다.
+- 브라우저 요청 생성 실패, 텔레그램 거절, timeout, dry-run, daemon 중단 시 가상 포지션을 열거나 닫지 않는다. BotEngine은 두 다리가 모두 `.clicked.done`이 된 뒤에만 DB/대시보드 포지션 상태를 변경한다.
+- 실행 중 Settings 변경은 DB 저장 후 `BOT_CONFIG_RELOAD_INTERVAL_SEC` 주기로 hot reload된다. TP/SL, Z-score revert, min/max hold 같은 청산 조건은 열린 포지션에도 반영되고, entry z-score/divergence/size/leverage/cost 설정은 다음 진입부터 반영된다.
+- `execution_mode` 또는 `primary_exchange` 변경은 실행 중 안전하게 바꾸지 않는다. 이 둘은 stop/start 또는 PM2 restart 후 적용한다.
 
 ### Phase V4: 브라우저 클릭 게이트
 
@@ -783,6 +785,7 @@ npm start -- --connect-wallet
 - request watcher는 `npm start -- --daemon`으로 실행하며, 만료/실패 파일은 `.expired.done` 또는 `.failed.done`으로 archive해 무한 재처리를 막는다.
 - 외부 공정가는 Binance, Lighter, Hyperliquid 중 살아 있는 소스의 median을 사용한다. Variational 화면 가격은 주문 UI 확인용이며 신호 기준가로 쓰지 않는다.
 - Lighter REST kline 403 문제 때문에 startup warmup은 Binance Futures klines를 우선 사용한다.
+- 실행 중 Settings 변경은 `BOT_CONFIG_RELOAD_INTERVAL_SEC` 간격으로 자동 반영된다. 텔레그램에는 `[Monk] CONFIG RELOADED`가 오며, 청산 조건은 열린 포지션에, 진입 조건과 size/leverage/cost는 다음 진입부터 적용된다.
 - 단일 다리 dry-run, BTC/ETH 다리 dry-run, Telegram 승인 후 live click, reduce-only close click이 소액 테스트에서 동작 확인되었다.
 
 현재 운영 흐름:
@@ -815,6 +818,7 @@ Warmup complete from binance: ...
 VARIATIONAL_BROWSER_COMPLETION_TIMEOUT_SEC=360
 VARIATIONAL_BROWSER_COMPLETION_POLL_SEC=1
 VARIATIONAL_BROWSER_RECONCILE_WINDOW_SEC=600
+BOT_CONFIG_RELOAD_INTERVAL_SEC=15
 ```
 
 남은 주의점:

@@ -190,6 +190,7 @@ async def _auto_resume_open_trades(session_factory) -> None:
     config = _build_runtime_config(BotStartRequest(), configs)
     _bot_engine = BotEngine(exchanges=exchanges, config=config)
     _bot_engine.set_session_factory(session_factory)
+    _bot_engine.set_config_loader(_build_runtime_config_loader(session_factory))
     broadcaster.set_bot_engine(_bot_engine)
     _bot_task = asyncio.create_task(_bot_engine.start())
     logger.info("Auto-resuming bot with %d open DB trade(s)", len(open_trades))
@@ -339,6 +340,15 @@ def _build_runtime_config(req: BotStartRequest, configs: Dict[str, Dict[str, Any
     )
 
 
+def _build_runtime_config_loader(session_factory):
+    async def load_runtime_config():
+        async with session_factory() as db:
+            configs = await _load_config_map(db)
+        return _build_runtime_config(BotStartRequest(), configs)
+
+    return load_runtime_config
+
+
 def _exchange_enabled(configs: Dict[str, Dict[str, Any]], name: str) -> bool:
     exchanges_cfg = configs.get("exchanges", {})
     if name not in exchanges_cfg:
@@ -425,6 +435,7 @@ async def bot_start(
     sf = getattr(app, 'state', None) and getattr(app.state, 'session_factory', None)
     if sf is not None:
         _bot_engine.set_session_factory(sf)
+        _bot_engine.set_config_loader(_build_runtime_config_loader(sf))
     broadcaster.set_bot_engine(_bot_engine)
     _bot_task = asyncio.create_task(_bot_engine.start())
 

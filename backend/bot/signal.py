@@ -464,8 +464,12 @@ class MultiTimeframeSignalEngine:
 
     def update_config(self, config: MultiTFConfig) -> None:
         """설정을 업데이트합니다."""
+        old_spreads = list(self._spread_5m)
         self.config = config
-        self._spread_5m = deque(maxlen=config.z_window_5m * 2)
+        self._spread_5m = deque(
+            old_spreads[-config.z_window_5m * 2:],
+            maxlen=config.z_window_5m * 2,
+        )
         logger.info("Signal config updated: mode=%s", config.mode.value)
 
     def reset(self) -> None:

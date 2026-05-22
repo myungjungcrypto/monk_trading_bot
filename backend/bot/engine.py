@@ -6,12 +6,13 @@ v2: REST 폴링 제거 → WebSocket 이벤트 드리븐 구조.
 """
 
 import asyncio
+import json
 import logging
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Awaitable, Callable, Dict, List, Optional
 
 from backend.bot.exchanges.backpack import BackpackExchange
 from backend.bot.exchanges.base import BaseExchange, PositionSide
@@ -140,6 +141,10 @@ class BotEngine:
         self._signal_count = 0
         self._last_tick_time: float = 0
         self._errors: list[str] = []
+        self._config_loader: Optional[Callable[[], Awaitable[BotConfig]]] = None
+        self._config_reload_interval = float(os.getenv("BOT_CONFIG_RELOAD_INTERVAL_SEC", "15"))
+        self._config_fingerprint = self._runtime_config_fingerprint(self.config)
+        self._ignored_reload_warning: Optional[str] = None
 
         # 첫 번째 활성 거래소 (주문 실행용)
         self._primary_exchange: Optional[BaseExchange] = None
@@ -148,6 +153,10 @@ class BotEngine:
         """DB 세션 팩토리를 설정하여 거래 기록을 활성화합니다."""
         self.trade_recorder = TradeRecorder(session_factory)
         logger.info("Trade recorder initialized — trades will be persisted to DB")
+
+    def set_config_loader(self, loader: Callable[[], Awaitable[BotConfig]]) -> None:
+        """실행 중 DB 설정을 다시 읽기 위한 비동기 로더를 설정합니다."""
+        self._config_loader = loader
 
     @staticmethod
     def _normalize_execution_mode(mode: str, paper_trading: bool) -> str:
@@ -406,6 +415,7 @@ class BotEngine:
                 self.price_hub.start(),                    # WS 연결 유지
                 self._position_monitor_loop(),             # 포지션 PNL 감시
                 self._status_log_loop(),                   # 주기적 상태 로그
+                self._config_reload_loop(),                # DB 설정 hot reload
             )
         except asyncio.CancelledError:
             logger.info("Bot engine tasks cancelled")
@@ -558,6 +568,137 @@ class BotEngine:
                 self._tick_count, self._signal_count, positions,
                 status["spread_5m_history_len"], status["window"],
             )
+
+    # ── 설정 hot reload ─────────────────────────────────────
+
+    async def _config_reload_loop(self) -> None:
+        """DB에 저장된 설정을 주기적으로 반영합니다."""
+        if self._config_loader is None:
+            return
+
+        while self._running:
+            await asyncio.sleep(self._config_reload_interval)
+            try:
+                loaded_config = await self._config_loader()
+                loaded_config = await self._coerce_hot_reload_config(loaded_config)
+                fingerprint = self._runtime_config_fingerprint(loaded_config)
+                if fingerprint == self._config_fingerprint:
+                    continue
+
+                await self._apply_runtime_config(loaded_config)
+                self._config_fingerprint = fingerprint
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                error_msg = f"Config reload error: {e}"
+                logger.warning(error_msg, exc_info=True)
+                self._errors.append(error_msg)
+                if len(self._errors) > 100:
+                    self._errors = self._errors[-50:]
+
+    async def _coerce_hot_reload_config(self, loaded_config: BotConfig) -> BotConfig:
+        """런타임에 안전하게 바꿀 수 없는 필드는 현재 값으로 고정합니다."""
+        requested_execution = self._normalize_execution_mode(
+            loaded_config.execution_mode,
+            loaded_config.paper_trading,
+        )
+        requested_primary = loaded_config.primary_exchange
+        ignored = []
+        if requested_execution != self.execution_mode:
+            ignored.append(
+                f"execution_mode={requested_execution} requires bot restart "
+                f"(running={self.execution_mode})"
+            )
+        if requested_primary != self.config.primary_exchange:
+            ignored.append(
+                f"primary_exchange={requested_primary} requires bot restart "
+                f"(running={self.config.primary_exchange})"
+            )
+
+        if ignored:
+            warning = "; ".join(ignored)
+            if warning != self._ignored_reload_warning:
+                self._ignored_reload_warning = warning
+                logger.warning("Ignored runtime config change: %s", warning)
+                if self.telegram:
+                    await self.telegram.status(
+                        "\n".join([
+                            "CONFIG RELOAD NOTICE",
+                            warning,
+                            "Stop and start the bot to apply execution venue changes.",
+                        ])
+                    )
+
+        loaded_config.execution_mode = self.config.execution_mode
+        loaded_config.paper_trading = self.config.paper_trading
+        loaded_config.primary_exchange = self.config.primary_exchange
+        return loaded_config
+
+    async def _apply_runtime_config(self, loaded_config: BotConfig) -> None:
+        """시그널/청산/사이즈 설정을 실행 중인 엔진에 반영합니다."""
+        old_config = self.config
+        self.config = loaded_config
+        self.config.execution_mode = old_config.execution_mode
+        self.config.paper_trading = old_config.paper_trading
+        self.config.primary_exchange = old_config.primary_exchange
+
+        signal_cfg = self.config.signal_config or MultiTFConfig.from_mode(self.config.trading_mode)
+        self.signal_engine.update_config(signal_cfg)
+
+        risk_cfg = self.config.risk_config or RiskConfig()
+        self.risk_manager.update_config(risk_cfg)
+        self._apply_virtual_risk_guards()
+
+        logger.info(
+            "Runtime config reloaded: mode=%s size=$%.0f leverage=%dx "
+            "entry_z=%.2f div=%.2f%% tp=%.2f%% sl=%.2f%% z_exit_min=%.2f%%",
+            self.config.trading_mode,
+            self.config.position_size_usd,
+            self.config.leverage,
+            signal_cfg.entry_zscore,
+            signal_cfg.divergence_threshold_pct,
+            risk_cfg.take_profit_pct,
+            risk_cfg.stop_loss_pct,
+            risk_cfg.zscore_exit_min_pnl_pct,
+        )
+        if self.telegram:
+            await self.telegram.send(
+                "\n".join([
+                    "[Monk] CONFIG RELOADED",
+                    f"mode: {self.config.trading_mode}",
+                    f"size: ${self.config.position_size_usd:.2f} per leg",
+                    f"leverage: {self.config.leverage}x",
+                    f"entry_zscore: {signal_cfg.entry_zscore:.3f}",
+                    f"divergence_threshold: {signal_cfg.divergence_threshold_pct:.4f}%",
+                    f"take_profit: {risk_cfg.take_profit_pct:.3f}%",
+                    f"stop_loss: {risk_cfg.stop_loss_pct:.3f}%",
+                    f"zscore_exit_min_pnl: {risk_cfg.zscore_exit_min_pnl_pct:.3f}%",
+                    f"min_hold_minutes: {risk_cfg.min_hold_minutes:.1f}",
+                    f"max_hold_hours: {risk_cfg.max_hold_hours:.1f}",
+                ])
+            )
+
+    def _apply_virtual_risk_guards(self) -> None:
+        if not self._uses_virtual_positions:
+            return
+        self.risk_manager.config.averaging_enabled = False
+        self.risk_manager.config.size_reduction_enabled = False
+
+    @staticmethod
+    def _runtime_config_fingerprint(config: BotConfig) -> str:
+        signal_cfg = config.signal_config or MultiTFConfig.from_mode(config.trading_mode)
+        risk_cfg = config.risk_config or RiskConfig()
+        payload = {
+            "position_size_usd": config.position_size_usd,
+            "leverage": config.leverage,
+            "trading_mode": config.trading_mode,
+            "signal_config": asdict(signal_cfg),
+            "risk_config": asdict(risk_cfg),
+            "taker_fee_bps": config.taker_fee_bps,
+            "slippage_bps": config.slippage_bps,
+            "position_check_interval": config.position_check_interval,
+        }
+        return json.dumps(payload, sort_keys=True, default=str)
 
     # ── 진입 처리 ───────────────────────────────────────────
 
