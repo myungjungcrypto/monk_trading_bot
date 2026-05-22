@@ -764,6 +764,68 @@ npm start -- --connect-wallet
 
 이 명령은 EC2 headless 브라우저에서 `Connect Wallet` → `WalletConnect`를 누르고, DOM/`Copy link`에서 `wc:` URI를 추출해 `runtime/walletconnect_uri.txt`에 저장한다. URI를 찾으면 브라우저 프로세스를 켜둔 채 두 번째 SSH 터미널에서 `tools/variational-wallet`에 URI를 넘겨 세션을 연결한다. `--connect-wallet` 중에는 Telegram button polling을 하지 않으므로 wallet signer의 승인 callback을 빼앗지 않는다. Variational은 세션 승인 뒤 `authenticate`/login `SIGN REQUEST`를 한 번 더 보낼 수 있으므로, 지갑 프로세스를 유지한 채 해당 서명까지 승인해야 웹 화면이 연결 상태로 유지된다. 이 인증 요청이 자동으로 오지 않는 경우 브라우저 도구가 `VARIATIONAL_BROWSER_AUTHENTICATE_SELECTORS`에 맞는 인증 버튼을 눌러 요청을 발생시킨다. 이미 세션만 연결되어 있고 인증만 남았다면 `cd tools/variational-browser && npm start -- --authenticate`로 인증 버튼만 다시 누를 수 있다. 이 인증 단계에서는 `tools/variational-wallet/.env`의 `VARIATIONAL_WC_DRY_RUN=false`가 필요하고, 주문 클릭 테스트는 별도로 `VARIATIONAL_BROWSER_DRY_RUN=true`를 유지한다.
 
+### 2026-05-22 진행상황
+
+현재 구현/검증된 것:
+
+- EC2 FastAPI backend, React dashboard, nginx reverse proxy, PM2 실행 구조가 동작한다.
+- `EXECUTION_MODE=variational_browser`가 추가되어, BotEngine이 거래소 API 대신 Variational browser request 파일을 생성할 수 있다.
+- `tools/variational-browser`는 persistent Playwright profile로 Variational Omni 웹 세션을 유지한다.
+- WalletConnect 연결은 `tools/variational-wallet`로 처리하고, Variational의 `Authenticate` 서명 요청까지 텔레그램 승인으로 처리한다.
+- Browser gate는 BTC/ETH perpetual 페이지 이동, Market 탭 선택, Buy/Sell 선택, Size 입력, Reduce Only 체크, 주문 버튼 후보 탐지, Telegram screenshot approval을 수행한다.
+- `confirmSelector=auto`가 기본값이며, Telegram 메시지에 `confirm_button_candidates`를 표시한다. broad selector live click은 차단한다.
+- 진입 요청은 양다리로 생성된다. `LONG_BTC_SHORT_ETH`는 BTC Buy + ETH Sell, `SHORT_BTC_LONG_ETH`는 BTC Sell + ETH Buy다.
+- 청산 요청은 원래 방향을 반전하고 `reduceOnly=true`를 사용한다. BotEngine 연동 청산은 가상 포지션에 저장된 실제 BTC/ETH 수량을 사용한다.
+- request watcher는 `npm start -- --daemon`으로 실행하며, 만료/실패 파일은 `.expired.done` 또는 `.failed.done`으로 archive해 무한 재처리를 막는다.
+- 외부 공정가는 Binance, Lighter, Hyperliquid 중 살아 있는 소스의 median을 사용한다. Variational 화면 가격은 주문 UI 확인용이며 신호 기준가로 쓰지 않는다.
+- Lighter REST kline 403 문제 때문에 startup warmup은 Binance Futures klines를 우선 사용한다.
+- 단일 다리 dry-run, BTC/ETH 다리 dry-run, Telegram 승인 후 live click, reduce-only close click이 소액 테스트에서 동작 확인되었다.
+
+현재 운영 흐름:
+
+```bash
+# 1) Browser watcher는 계속 켜둔다.
+cd ~/monk_trading_bot/tools/variational-browser
+npm start -- --daemon
+
+# 2) Backend를 최신 코드로 실행한다.
+cd ~/monk_trading_bot
+pm2 restart monk-api --update-env
+
+# 3) Dashboard에서 Execution Mode를 Variational Browser로 두고 Run Swing을 누른다.
+#    또는 API/UI로 bot start를 호출한다.
+```
+
+정상 로그 예:
+
+```text
+Config: size=$500, leverage=3x, execution=variational_browser, telegram=True
+Warmup: using binance klines
+Warmup complete from binance: ...
+[Variational Browser] request watcher started
+```
+
+남은 주의점:
+
+- Telegram 승인 timeout, 거절, 사용자의 수동 kill switch, 웹 UI 변경이 있으면 대시보드 가상 포지션과 실제 Variational 포지션이 어긋날 수 있다.
+- 따라서 live 테스트는 계속 소액으로 진행하고, Telegram screenshot의 `symbol`, `side`, `quantity`, `reduceOnly`, `confirm_button_candidates`를 확인해야 한다.
+- `tools/variational-wallet`과 `tools/variational-browser`가 같은 Telegram bot token으로 동시에 polling하면 callback을 서로 가져갈 수 있다. 가능하면 브라우저 승인용 bot token을 분리한다.
+- Variational 공식 trading API가 생기면 browser click gate는 제거하고 API execution adapter로 교체하는 것이 최종 목표다.
+
+### English Explanation: Trading Without a Variational API
+
+Variational does not currently expose a public trading API, so this project uses a controlled browser-execution bridge instead of direct API order placement.
+
+The trading signal engine still runs server-side. It receives live BTC/ETH prices, builds the pair-trading signal, and calculates order size from an external fair price. That fair price is the median of independent venues such as Binance, Lighter, and Hyperliquid, so Variational's on-screen price is not used as the decision source.
+
+When the bot wants to trade on Variational, it does not send an order to an exchange API. Instead, it writes a local request file describing the intended leg: symbol, side, quantity, reduce-only flag, fair price snapshot, and expiration time. A separate Playwright browser process watches this request directory. That browser keeps a persistent Variational web session open on the EC2 instance.
+
+For each request, the browser opens the correct Variational market page, selects Market order mode, chooses Buy or Sell, fills the size field, optionally enables Reduce Only, and then captures a screenshot of the prepared order panel. Before it clicks anything, it sends the screenshot and order details to Telegram. The human operator must approve the action from Telegram within the timeout window. Only after approval does the browser click the detected final order button. If the request is rejected or times out, no click is made.
+
+WalletConnect is used only to keep the Variational web session authenticated. In our testing, Variational did not require a new wallet signature for every order after the web session was authenticated. Because of that, the key approval point for each trade is the Telegram-controlled final browser click, not a per-order blockchain signature.
+
+The system also supports closing positions by generating reduce-only browser requests with the exact tracked quantities. This means the backend can maintain virtual trade/PnL records while the browser bridge performs the actual Variational UI actions. The main risk is that browser automation depends on the website UI staying stable, so every live action is guarded by screenshots, Telegram approval, short expirations, request archival, and small-size testing.
+
 ---
 
 *NFA. 전략 구현 참고 목적. 실제 거래 시 충분한 테스트 후 소액부터 시작하세요.*
