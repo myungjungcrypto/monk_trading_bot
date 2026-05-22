@@ -253,6 +253,10 @@ automatically. Keep the browser daemon running so those files are converted into
 Telegram approval screenshots. Close requests are reduce-only and use the
 tracked virtual leg quantities.
 
+The daemon archives processed request files as `*.done`. Expired or malformed
+requests are archived as `*.expired.done` / `*.failed.done` so an old file cannot
+block the watcher forever.
+
 ## Live Clicks
 
 Only after screenshots and selectors are verified:
