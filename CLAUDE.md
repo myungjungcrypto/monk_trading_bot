@@ -720,7 +720,8 @@ python -m backend.scripts.create_variational_browser_request \
 - Browser gate는 `variationalOrder`가 있으면 symbol 페이지 이동 → Market 탭 → Buy/Sell 선택 → Size 입력 → 스크린샷 승인 순서로 처리한다.
 - `variationalOrder.reduceOnly=true`이면 Reduce Only 체크박스를 켠 뒤 Size를 입력한다.
 - 새 요청의 기본 `confirmSelector`는 `auto`다. Browser gate는 주문 패널 영역의 활성 버튼 후보를 텔레그램 메시지에 표시하고, broad selector(`body`, `html`, `*`)는 live click에서 차단한다.
-- `VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY=true`이면 `action=close` + `reduceOnly=true` 요청은 텔레그램 승인 없이 자동 클릭한다. 오픈 요청은 계속 텔레그램 승인을 요구한다.
+- `VARIATIONAL_BROWSER_AUTO_CLICK_OPEN=true`이면 backend-created BTC/ETH batch 진입도 텔레그램 승인 없이 자동 클릭한다. 이 경로는 `VARIATIONAL_BROWSER_AUTO_CLICK_OPEN_MAX_SIZE_USD` 이하의 양다리 open batch에만 적용된다. 기본값은 false다.
+- `VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY=true`이면 `action=close` + `reduceOnly=true` 요청은 텔레그램 승인 없이 자동 클릭한다.
 - `VARIATIONAL_BROWSER_BATCH_REQUESTS=true`이면 BotEngine이 만드는 BTC/ETH 두 다리는 하나의 batch request 파일로 저장된다. 오픈은 한 번 승인으로 두 다리를 순차 클릭하고, 청산은 한 번의 자동 reduce-only batch로 두 다리를 순차 클릭한다. reduce-only 청산 batch에서 한 다리가 실패하면 실패 다리를 `VARIATIONAL_BROWSER_REDUCE_ONLY_BATCH_RETRY_ATTEMPTS` 횟수만큼 재시도한다.
 
 자동 봇 연동:
@@ -822,6 +823,8 @@ Warmup complete from binance: ...
 VARIATIONAL_BROWSER_COMPLETION_TIMEOUT_SEC=360
 VARIATIONAL_BROWSER_COMPLETION_POLL_SEC=1
 VARIATIONAL_BROWSER_RECONCILE_WINDOW_SEC=600
+VARIATIONAL_BROWSER_AUTO_CLICK_OPEN=false
+VARIATIONAL_BROWSER_AUTO_CLICK_OPEN_MAX_SIZE_USD=100
 VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY=true
 VARIATIONAL_BROWSER_BATCH_REQUESTS=true
 BOT_CONFIG_RELOAD_INTERVAL_SEC=15
@@ -842,7 +845,7 @@ The trading signal engine still runs server-side. It receives live BTC/ETH price
 
 When the bot wants to trade on Variational, it does not send an order to an exchange API. Instead, it writes a local request file describing the intended leg: symbol, side, quantity, reduce-only flag, fair price snapshot, and expiration time. A separate Playwright browser process watches this request directory. That browser keeps a persistent Variational web session open on the EC2 instance.
 
-For each pair entry, the backend writes one batch request containing both BTC and ETH legs. The browser opens each Variational market page, selects Market order mode, chooses Buy or Sell, fills the size field, and sends preview screenshots for both legs. Before it opens new exposure, it asks for one Telegram approval for the full pair. Only after that single approval does the browser click the BTC and ETH order buttons sequentially. If the first leg clicks and a later leg fails, the browser attempts an immediate reduce-only rollback of the already-clicked entry leg and does not report the batch as successfully clicked.
+For each pair entry, the backend writes one batch request containing both BTC and ETH legs. The browser opens each Variational market page, selects Market order mode, chooses Buy or Sell, fills the size field, and sends preview screenshots for both legs. In the default safer mode, it asks for one Telegram approval for the full pair before clicking. In fully automated mode, `VARIATIONAL_BROWSER_AUTO_CLICK_OPEN=true` skips that approval for backend-created pair batches under `VARIATIONAL_BROWSER_AUTO_CLICK_OPEN_MAX_SIZE_USD`. If the first leg clicks and a later leg fails, the browser attempts an immediate reduce-only rollback of the already-clicked entry leg and does not report the batch as successfully clicked.
 
 Close requests are different. They are generated as a batch of reduce-only orders with the exact tracked quantities. Because they reduce exposure rather than create new exposure, the browser can auto-click the batch when `VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY=true`, every leg has `action=close`, and every leg has `reduceOnly=true`. The browser still sends pre-click and post-click screenshots to Telegram for audit, dry-run mode still skips the click, and failed reduce-only legs are retried before the daemon reports a partial close failure.
 

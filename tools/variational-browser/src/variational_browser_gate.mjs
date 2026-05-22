@@ -442,6 +442,8 @@ class VariationalBrowserGate {
       "[Variational Browser] request watcher started",
       `dir: ${this.config.requestDir}`,
       `dry_run: ${this.config.dryRun}`,
+      `auto_click_open: ${this.config.autoClickOpen}`,
+      `auto_click_open_max_size_usd: ${this.config.autoClickOpenMaxSizeUsd}`,
       `auto_click_reduce_only: ${this.config.autoClickReduceOnly}`,
     ].join("\n"));
 
@@ -589,6 +591,7 @@ class VariationalBrowserGate {
     }
 
     const autoReduceOnly = legs.every((leg) => this.shouldAutoClickReduceOnly(leg));
+    const autoOpen = this.shouldAutoClickOpenBatch(request, legs);
     const dryRun = request.dryRun ?? this.config.dryRun;
     const clickedLegs = [];
     console.log(`[Variational Browser] processing batch request: ${request.id || "(no id)"} legs=${legs.length}`);
@@ -604,17 +607,21 @@ class VariationalBrowserGate {
         );
       }
 
-      const decision = await this.telegram.requestApproval({
-        title: "[Variational Browser] PAIR ORDER CLICK REQUEST",
-        body: this.buildBatchApprovalBody(request, legs, previews),
-        approveLabel: "Click Pair",
-        rejectLabel: "Reject",
-        timeoutMs: Number(request.approvalTimeoutMs ?? this.config.approvalTimeoutMs),
-      });
-      if (!decision.approved) {
-        await this.telegram.sendMessage(`[Variational Browser] batch rejected\nid: ${request.id}\nreason: ${decision.reason}`);
-        console.log(`[Variational Browser] batch rejected: ${decision.reason}`);
-        return { status: "rejected", reason: decision.reason };
+      if (autoOpen) {
+        await this.telegram.sendMessage(this.buildAutoBatchOpenCaption(request, legs, previews));
+      } else {
+        const decision = await this.telegram.requestApproval({
+          title: "[Variational Browser] PAIR ORDER CLICK REQUEST",
+          body: this.buildBatchApprovalBody(request, legs, previews),
+          approveLabel: "Click Pair",
+          rejectLabel: "Reject",
+          timeoutMs: Number(request.approvalTimeoutMs ?? this.config.approvalTimeoutMs),
+        });
+        if (!decision.approved) {
+          await this.telegram.sendMessage(`[Variational Browser] batch rejected\nid: ${request.id}\nreason: ${decision.reason}`);
+          console.log(`[Variational Browser] batch rejected: ${decision.reason}`);
+          return { status: "rejected", reason: decision.reason };
+        }
       }
     } else {
       await this.telegram.sendMessage(this.buildAutoBatchReduceOnlyCaption(request, legs));
@@ -841,6 +848,51 @@ class VariationalBrowserGate {
     const order = request.variationalOrder || {};
     const action = String(order.action || request.signal?.action || "").toLowerCase();
     return action === "close" && order.reduceOnly === true;
+  }
+
+  shouldAutoClickOpenBatch(request, legs) {
+    if (!this.config.autoClickOpen) return false;
+    if (request.autoClickOpen === false) return false;
+
+    const orders = legs.map((leg) => leg.variationalOrder || {});
+    const symbols = new Set(orders.map((order) => String(order.symbol || "").toUpperCase()));
+    if (legs.length !== 2 || !symbols.has("BTC") || !symbols.has("ETH")) {
+      throw new Error("auto open requires exactly one BTC leg and one ETH leg");
+    }
+
+    for (const leg of legs) {
+      const order = leg.variationalOrder || {};
+      const action = String(order.action || leg.signal?.action || request.signal?.action || "open").toLowerCase();
+      if (action !== "open" || order.reduceOnly === true) {
+        throw new Error("auto open only supports non-reduce-only open legs");
+      }
+    }
+
+    const sizeUsd = this.batchSizeUsd(request, legs);
+    const maxSizeUsd = Number(this.config.autoClickOpenMaxSizeUsd || 0);
+    if (maxSizeUsd > 0) {
+      if (!Number.isFinite(sizeUsd) || sizeUsd <= 0) {
+        throw new Error("auto open requires size_usd_per_leg when max size guard is enabled");
+      }
+      if (sizeUsd > maxSizeUsd) {
+        throw new Error(`auto open size exceeds guard: ${sizeUsd} > ${maxSizeUsd}`);
+      }
+    }
+    return true;
+  }
+
+  batchSizeUsd(request, legs) {
+    const candidates = [
+      request.signal?.size_usd_per_leg,
+      request.signal?.sizeUsdPerLeg,
+      ...legs.map((leg) => leg.signal?.size_usd_per_leg),
+      ...legs.map((leg) => leg.signal?.sizeUsdPerLeg),
+    ];
+    for (const candidate of candidates) {
+      const value = Number(candidate);
+      if (Number.isFinite(value) && value > 0) return value;
+    }
+    return NaN;
   }
 
   async setupVariationalOrder(order) {
@@ -1418,6 +1470,29 @@ class VariationalBrowserGate {
     return lines.join("\n").slice(0, 3500);
   }
 
+  buildAutoBatchOpenCaption(request, legs, previews = []) {
+    const sizeUsd = this.batchSizeUsd(request, legs);
+    const lines = [
+      "[Variational Browser] AUTO PAIR OPEN",
+      `id: ${request.id || ""}`,
+      `dry_run: ${request.dryRun ?? this.config.dryRun}`,
+      `max_size_usd_per_leg: ${this.config.autoClickOpenMaxSizeUsd}`,
+      Number.isFinite(sizeUsd) ? `size_usd_per_leg: ${sizeUsd}` : "size_usd_per_leg: unknown",
+      "",
+      request.summary || "No summary provided.",
+      "",
+      "legs:",
+    ];
+    for (const leg of legs) {
+      const order = leg.variationalOrder || {};
+      lines.push(`- ${order.symbol || ""} ${order.side || ""} qty=${order.quantity || ""} reduce_only=${order.reduceOnly === true}`);
+    }
+    if (previews.length) {
+      lines.push("", "preview_screenshots_sent: true");
+    }
+    return lines.join("\n").slice(0, 3500);
+  }
+
   buildAutoBatchReduceOnlyCaption(request, legs) {
     const lines = [
       "[Variational Browser] AUTO PAIR REDUCE-ONLY",
@@ -1449,6 +1524,8 @@ function loadConfig() {
     headless: envBool("VARIATIONAL_BROWSER_HEADLESS", true),
     dryRun: envBool("VARIATIONAL_BROWSER_DRY_RUN", true),
     autoClickReduceOnly: envBool("VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY", true),
+    autoClickOpen: envBool("VARIATIONAL_BROWSER_AUTO_CLICK_OPEN", false),
+    autoClickOpenMaxSizeUsd: Number(env("VARIATIONAL_BROWSER_AUTO_CLICK_OPEN_MAX_SIZE_USD", "100")),
     approvalTimeoutMs: Number(env("VARIATIONAL_BROWSER_APPROVAL_TIMEOUT_SEC", "45")) * 1000,
     actionTimeoutMs: Number(env("VARIATIONAL_BROWSER_ACTION_TIMEOUT_SEC", "15000")),
     previewDelayMs: Number(env("VARIATIONAL_BROWSER_PREVIEW_DELAY_MS", "1000")),
