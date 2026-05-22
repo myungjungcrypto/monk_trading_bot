@@ -9,7 +9,7 @@ import { chromium } from "playwright";
 const ROOT = path.resolve(new URL("../../../", import.meta.url).pathname);
 const TOOL_DIR = path.join(ROOT, "tools", "variational-browser");
 dotenv.config({ path: path.join(ROOT, "backend", ".env") });
-dotenv.config({ path: path.join(TOOL_DIR, ".env") });
+dotenv.config({ path: path.join(TOOL_DIR, ".env"), override: true });
 
 function env(name, fallback = "") {
   return process.env[name]?.trim() || fallback;

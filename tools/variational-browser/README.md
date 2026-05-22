@@ -30,6 +30,10 @@ You can keep shared Telegram values in `backend/.env`, but if
 for this process. Telegram `getUpdates` is single-consumer; two pollers on one
 bot token can steal each other's button clicks.
 
+Values in `tools/variational-browser/.env` override the shared `backend/.env`.
+Use the tool-local file for live-click controls such as
+`VARIATIONAL_BROWSER_DRY_RUN=false`.
+
 ## First Session Setup
 
 On EC2, use noVNC/X11 or run this locally first:
