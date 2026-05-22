@@ -695,6 +695,7 @@ python -m backend.scripts.create_variational_browser_request \
 - 진입/청산 신호, 텔레그램 승인 요약, 주문 직전 sanity check는 외부 median fair price를 기준으로 한다.
 - 3개 중 1개 소스가 응답하지 않아도 2개 이상이면 진행 가능하다.
 - Browser gate는 `variationalOrder`가 있으면 symbol 페이지 이동 → Market 탭 → Buy/Sell 선택 → Size 입력 → 스크린샷 승인 순서로 처리한다.
+- 새 요청의 기본 `confirmSelector`는 `auto`다. Browser gate는 주문 패널 영역의 활성 버튼 후보를 텔레그램 메시지에 표시하고, broad selector(`body`, `html`, `*`)는 live click에서 차단한다.
 
 ### Phase V4: 브라우저 클릭 게이트
 
@@ -715,13 +716,13 @@ npm start -- --open
 - Persistent browser profile에 Variational 로그인/WalletConnect 세션을 유지한다.
 - 신호 봇은 `tools/variational-browser/runtime/requests/*.json` 주문 요청 파일을 만든다.
 - Browser gate는 주문창 세팅 후 스크린샷을 텔레그램으로 전송한다.
-- Telegram `Click` 승인 시에만 최종 주문 버튼 selector를 클릭한다.
+- Telegram `Click` 승인 시에만 최종 주문 버튼 후보를 클릭한다.
 - 기본값은 `VARIATIONAL_BROWSER_DRY_RUN=true`이므로, 처음에는 승인 후에도 클릭하지 않는다.
 
 주의:
 - `tools/variational-wallet`과 `tools/variational-browser`를 같은 Telegram bot token으로 동시에 실행하면 `getUpdates` 이벤트를 서로 가져갈 수 있다.
 - 둘을 동시에 켤 때는 `VARIATIONAL_BROWSER_TELEGRAM_BOT_TOKEN`에 별도 봇 토큰을 쓰는 것을 권장한다.
-- selector는 Variational UI 변경에 취약하므로, 라이브 전에는 최소 주문으로 스크린샷/selector를 확인한다.
+- selector와 버튼 후보는 Variational UI 변경에 취약하므로, 라이브 전에는 최소 주문으로 스크린샷의 `confirm_button_candidates`를 확인한다.
 
 WalletConnect 연결:
 

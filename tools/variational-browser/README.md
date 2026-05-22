@@ -134,7 +134,7 @@ Future signal bots can create request files:
   "createdAt": "2026-05-22T00:00:00.000Z",
   "url": "https://omni.variational.io/perpetual/BTC",
   "summary": "LONG_BTC_SHORT_ETH / BTC BUY / $50",
-  "confirmSelector": "button:has-text(\"Submit\")",
+  "confirmSelector": "auto",
   "dryRun": true,
   "variationalOrder": {
     "symbol": "BTC",
@@ -168,6 +168,10 @@ click points through `VARIATIONAL_BROWSER_BUY_FALLBACK_POINT` and
 DOM input, it can fall back to `VARIATIONAL_BROWSER_SIZE_FALLBACK_POINT` and
 type the generated quantity there. Keep this in dry-run until the Telegram
 screenshot confirms the correct side and size are selected.
+
+With `confirmSelector: "auto"`, the approval caption lists enabled final-button
+candidates from the order panel area. Live mode refuses broad selectors such as
+`body`, `html`, or `*`; either keep `auto` or provide a precise button selector.
 
 Process one request:
 
@@ -212,6 +216,10 @@ Only after screenshots and selectors are verified:
 
 ```env
 VARIATIONAL_BROWSER_DRY_RUN=false
+VARIATIONAL_BROWSER_CONFIRM_SELECTOR=auto
 ```
 
+The approval message should show a sane `confirm_button_candidates` entry before
+you approve a live click. If no candidate is found, the live click is blocked
+unless `VARIATIONAL_BROWSER_CONFIRM_FALLBACK_ENABLED=true` is explicitly set.
 Keep order size small and use a dedicated Variational wallet.

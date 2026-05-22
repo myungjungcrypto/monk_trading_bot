@@ -32,7 +32,7 @@ def args(**overrides):
         "divergence_pct": None,
         "base_url": "https://omni.variational.io/perpetual/BTC",
         "legs": "both",
-        "confirm_selector": "body",
+        "confirm_selector": "auto",
         "dry_run": True,
         "request_dir": "",
         "steps_json": "",
@@ -63,6 +63,7 @@ def test_build_requests_creates_two_variational_legs():
     btc, eth = requests
     assert btc["url"] == "https://omni.variational.io/perpetual/BTC"
     assert btc["maxAgeSec"] == 300
+    assert btc["confirmSelector"] == "auto"
     assert btc["variationalOrder"] == {
         "symbol": "BTC",
         "side": "BUY",

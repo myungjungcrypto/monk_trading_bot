@@ -504,7 +504,11 @@ class VariationalBrowserGate {
 
     console.log("[Variational Browser] capturing approval screenshot...");
     const screenshotPath = await this.captureScreenshot(request.id || `request-${started}`);
-    const body = this.buildApprovalBody(request, screenshotPath);
+    const confirmCandidates = await this.getConfirmCandidates(request.variationalOrder).catch((error) => {
+      console.warn("[Variational Browser] confirm candidate scan failed:", error.message);
+      return [];
+    });
+    const body = this.buildApprovalBody(request, screenshotPath, confirmCandidates);
     console.log("[Variational Browser] sending Telegram approval request...");
     const decision = await this.telegram.requestApproval({
       title: "[Variational Browser] ORDER CLICK REQUEST",
@@ -527,8 +531,8 @@ class VariationalBrowserGate {
       return { status: "dryrun" };
     }
 
-    console.log("[Variational Browser] clicking final confirm selector...");
-    await this.clickConfirm(request.confirmSelector || this.config.confirmSelector);
+    console.log("[Variational Browser] clicking final confirm control...");
+    await this.clickConfirm(request, confirmCandidates);
     await this.page.waitForTimeout(Number(request.afterClickDelayMs ?? this.config.afterClickDelayMs));
     const afterPath = await this.captureScreenshot(`${request.id || "request"}-after`);
     await this.telegram.sendPhoto(afterPath, `[Variational Browser] clicked\nid: ${request.id}`);
@@ -546,8 +550,9 @@ class VariationalBrowserGate {
       throw new Error(`request expired: ${request.createdAt}`);
     }
     const selector = request.confirmSelector || this.config.confirmSelector;
-    if (!selector) {
-      throw new Error("confirmSelector is required");
+    const dryRun = request.dryRun ?? this.config.dryRun;
+    if (!dryRun && isUnsafeConfirmSelector(selector)) {
+      throw new Error(`Unsafe confirmSelector for live click: ${selector}`);
     }
   }
 
@@ -657,10 +662,86 @@ class VariationalBrowserGate {
     }
   }
 
-  async clickConfirm(selector) {
-    const locator = this.page.locator(selector);
-    await locator.waitFor({ state: "visible" });
-    await locator.click();
+  async getConfirmCandidates(order = undefined) {
+    const side = String(order?.side || "").toUpperCase();
+    const symbol = String(order?.symbol || "").toUpperCase();
+    const viewport = this.page.viewportSize() || this.config.viewport;
+    const minX = viewport.width * this.config.confirmCandidateMinXRatio;
+    const minY = viewport.height * this.config.confirmCandidateMinYRatio;
+    const maxY = viewport.height * this.config.confirmCandidateMaxYRatio;
+    const candidates = await this.page.locator("button").evaluateAll((buttons, params) => {
+      const { minX, minY, maxY, side, symbol } = params;
+      return buttons.map((button, index) => {
+        const rect = button.getBoundingClientRect();
+        const text = (button.innerText || button.textContent || "").replace(/\s+/g, " ").trim();
+        const style = window.getComputedStyle(button);
+        const ariaDisabled = button.getAttribute("aria-disabled") === "true";
+        const disabled = Boolean(button.disabled || ariaDisabled);
+        const visible = rect.width > 1
+          && rect.height > 1
+          && style.visibility !== "hidden"
+          && style.display !== "none"
+          && Number(style.opacity || "1") > 0.01;
+        let score = 0;
+        const upper = text.toUpperCase();
+        if (visible) score += 10;
+        if (!disabled) score += 10;
+        if (rect.x >= minX && rect.y >= minY && rect.y <= maxY) score += 25;
+        if (side && upper.includes(side)) score += 20;
+        if (symbol && upper.includes(symbol)) score += 8;
+        if (/ORDER|PLACE|SUBMIT|LONG|SHORT|BUY|SELL/i.test(text)) score += 8;
+        if (/CONNECT|AUTHENTICATE|TRANSFER|MARKET|LIMIT|CROSS|PRO|TP\/SL|50X/i.test(text)) score -= 20;
+        if (/ENTER SIZE/i.test(text)) score -= 40;
+        if (disabled) score -= 60;
+        return {
+          index,
+          text,
+          disabled,
+          x: Math.round(rect.x),
+          y: Math.round(rect.y),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+          score,
+        };
+      });
+    }, { minX, minY, maxY, side, symbol });
+
+    return candidates
+      .filter((candidate) => candidate.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, this.config.confirmCandidateLimit);
+  }
+
+  async clickConfirm(request, confirmCandidates = []) {
+    const selector = String(request.confirmSelector || this.config.confirmSelector || "auto").trim();
+    if (selector && selector.toLowerCase() !== "auto") {
+      if (isUnsafeConfirmSelector(selector)) {
+        throw new Error(`Unsafe confirmSelector for live click: ${selector}`);
+      }
+      const locator = this.page.locator(selector).first();
+      await locator.waitFor({ state: "visible" });
+      await locator.click();
+      return `selector:${selector}`;
+    }
+
+    const candidate = confirmCandidates.find((item) => !item.disabled) || (await this.getConfirmCandidates(request.variationalOrder)).find((item) => !item.disabled);
+    if (candidate) {
+      console.log(`[Variational Browser] auto confirm candidate: #${candidate.index} "${candidate.text}" score=${candidate.score}`);
+      await this.page.locator("button").nth(candidate.index).click();
+      return `button:${candidate.index}`;
+    }
+
+    if (!this.config.confirmFallbackEnabled) {
+      throw new Error("No enabled confirm button candidate found. Keep dry-run on and inspect the approval screenshot.");
+    }
+
+    const viewport = this.page.viewportSize() || this.config.viewport;
+    const point = this.config.confirmFallbackPoint;
+    const x = Math.round(viewport.width * point.x);
+    const y = Math.round(viewport.height * point.y);
+    console.log(`[Variational Browser] confirm candidate not found; clicking fallback point x=${x} y=${y}`);
+    await this.page.mouse.click(x, y);
+    return `fallback:${point.x},${point.y}`;
   }
 
   async waitForWalletReady() {
@@ -897,7 +978,7 @@ class VariationalBrowserGate {
     return filePath;
   }
 
-  buildApprovalBody(request, screenshotPath) {
+  buildApprovalBody(request, screenshotPath, confirmCandidates = []) {
     const lines = [
       `id: ${request.id || ""}`,
       `url: ${this.page.url()}`,
@@ -906,8 +987,19 @@ class VariationalBrowserGate {
       "",
       request.summary || "No summary provided.",
     ];
+    if (confirmCandidates.length) {
+      lines.push(
+        "",
+        "confirm_button_candidates:",
+        ...confirmCandidates.slice(0, 3).map((candidate) => (
+          `#${candidate.index} score=${candidate.score} disabled=${candidate.disabled} text="${candidate.text}" box=${candidate.x},${candidate.y},${candidate.width}x${candidate.height}`
+        )),
+      );
+    } else {
+      lines.push("", "confirm_button_candidates: none");
+    }
     if (request.signal) {
-      lines.push("", "signal:", JSON.stringify(request.signal, null, 2).slice(0, 1200));
+      lines.push("", "signal:", JSON.stringify(request.signal, null, 2).slice(0, 900));
     }
     if (request.variationalOrder) {
       lines.push("", "variational_order:", JSON.stringify(request.variationalOrder, null, 2).slice(0, 800));
@@ -926,7 +1018,7 @@ function loadConfig() {
     profileDir: path.resolve(ROOT, env("VARIATIONAL_BROWSER_PROFILE_DIR", path.join("tools", "variational-browser", "runtime", "profile"))),
     requestDir: path.resolve(ROOT, env("VARIATIONAL_BROWSER_REQUEST_DIR", path.join("tools", "variational-browser", "runtime", "requests"))),
     screenshotDir: path.resolve(ROOT, env("VARIATIONAL_BROWSER_SCREENSHOT_DIR", path.join("tools", "variational-browser", "runtime", "screenshots"))),
-    confirmSelector: env("VARIATIONAL_BROWSER_CONFIRM_SELECTOR"),
+    confirmSelector: env("VARIATIONAL_BROWSER_CONFIRM_SELECTOR", "auto"),
     headless: envBool("VARIATIONAL_BROWSER_HEADLESS", true),
     dryRun: envBool("VARIATIONAL_BROWSER_DRY_RUN", true),
     approvalTimeoutMs: Number(env("VARIATIONAL_BROWSER_APPROVAL_TIMEOUT_SEC", "45")) * 1000,
@@ -1001,12 +1093,23 @@ function loadConfig() {
     orderSellFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_SELL_FALLBACK_POINT", "0.94,0.186")),
     orderSizeFallbackEnabled: envBool("VARIATIONAL_BROWSER_SIZE_FALLBACK_ENABLED", true),
     orderSizeFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_SIZE_FALLBACK_POINT", "0.93,0.292")),
+    confirmCandidateMinXRatio: Number(env("VARIATIONAL_BROWSER_CONFIRM_CANDIDATE_MIN_X_RATIO", "0.70")),
+    confirmCandidateMinYRatio: Number(env("VARIATIONAL_BROWSER_CONFIRM_CANDIDATE_MIN_Y_RATIO", "0.30")),
+    confirmCandidateMaxYRatio: Number(env("VARIATIONAL_BROWSER_CONFIRM_CANDIDATE_MAX_Y_RATIO", "0.60")),
+    confirmCandidateLimit: Number(env("VARIATIONAL_BROWSER_CONFIRM_CANDIDATE_LIMIT", "5")),
+    confirmFallbackEnabled: envBool("VARIATIONAL_BROWSER_CONFIRM_FALLBACK_ENABLED", false),
+    confirmFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_CONFIRM_FALLBACK_POINT", "0.844,0.431")),
     walletConnectUriSelector: env("VARIATIONAL_BROWSER_WC_URI_SELECTOR"),
     telegramToken: requireEnv("VARIATIONAL_BROWSER_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"),
     telegramChatId: requireEnv("VARIATIONAL_BROWSER_TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID"),
     telegramAllowedUserIds: envList("VARIATIONAL_BROWSER_TELEGRAM_ALLOWED_USER_IDS", envList("TELEGRAM_ALLOWED_USER_IDS", [])),
     runtimeDir,
   };
+}
+
+function isUnsafeConfirmSelector(selector) {
+  const normalized = String(selector || "").trim().toLowerCase();
+  return ["", "body", "html", "*", "main", "#root", "div"].includes(normalized);
 }
 
 function parsePoint(value) {
