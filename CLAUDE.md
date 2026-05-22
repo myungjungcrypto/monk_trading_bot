@@ -709,6 +709,13 @@ python -m backend.scripts.create_variational_browser_request \
 - `variationalOrder.reduceOnly=true`이면 Reduce Only 체크박스를 켠 뒤 Size를 입력한다.
 - 새 요청의 기본 `confirmSelector`는 `auto`다. Browser gate는 주문 패널 영역의 활성 버튼 후보를 텔레그램 메시지에 표시하고, broad selector(`body`, `html`, `*`)는 live click에서 차단한다.
 
+자동 봇 연동:
+- `EXECUTION_MODE=variational_browser`이면 BotEngine은 실제 거래소 API 주문을 넣지 않고, `variational_browser` 가상 포지션으로 PnL/DB를 추적한다.
+- 진입 신호가 나면 `backend.bot.variational.browser_requests.VariationalBrowserRequestBridge`가 BTC/ETH 두 다리 요청 파일을 자동 생성한다.
+- 청산 신호가 나면 기존 가상 포지션의 실제 추적 수량으로 `--action close`와 같은 reduce-only 청산 요청 파일을 자동 생성한다.
+- 요청 파일은 `VARIATIONAL_BROWSER_REQUEST_DIR` 아래에 저장되며, `tools/variational-browser`를 `npm start -- --daemon`으로 켜두면 순차 처리된다.
+- 브라우저 요청 생성 실패 시 가상 포지션을 열거나 닫지 않는다. 요청 생성 이후 텔레그램에서 사용자가 거절하거나 timeout이 나면 대시보드 상태와 실제 Variational 포지션이 달라질 수 있으므로, 운영자는 스크린샷 승인/거절을 신중히 처리해야 한다.
+
 ### Phase V4: 브라우저 클릭 게이트
 
 목적: 주문마다 지갑 서명이 발생하지 않는 경우, Playwright가 최종 주문 버튼을 누르기 전에 텔레그램 승인을 요구한다.

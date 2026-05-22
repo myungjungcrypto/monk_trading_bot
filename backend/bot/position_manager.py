@@ -260,6 +260,8 @@ class PositionManager:
         spread_pct: float = 0.0,
         taker_fee_bps: float = 0.0,
         slippage_bps: float = 0.0,
+        btc_quantity: Optional[float] = None,
+        eth_quantity: Optional[float] = None,
     ) -> Optional[PairTrade]:
         """
         실주문 없이 페어 포지션을 엽니다.
@@ -267,8 +269,8 @@ class PositionManager:
         alert_only / paper 모드에서 텔레그램 진입-청산 흐름과 리스크 로직을
         실전 주문 전에 검증하기 위한 가상 포지션입니다.
         """
-        btc_qty = self._calculate_quantity(size_usd, btc_price, "BTC")
-        eth_qty = self._calculate_quantity(size_usd, eth_price, "ETH")
+        btc_qty = btc_quantity or self._calculate_quantity(size_usd, btc_price, "BTC")
+        eth_qty = eth_quantity or self._calculate_quantity(size_usd, eth_price, "ETH")
         if btc_qty <= 0 or eth_qty <= 0:
             logger.error("Invalid virtual quantity: BTC=%s ETH=%s", btc_qty, eth_qty)
             return None

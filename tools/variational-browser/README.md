@@ -239,6 +239,20 @@ Watch a directory:
 npm start -- --daemon
 ```
 
+Backend auto mode:
+
+```env
+EXECUTION_MODE=variational_browser
+PRIMARY_EXCHANGE=lighter
+VARIATIONAL_BROWSER_ENGINE_LEGS=both
+```
+
+With that mode, BotEngine keeps virtual PnL/DB state under the
+`variational_browser` exchange name and writes open/close request files
+automatically. Keep the browser daemon running so those files are converted into
+Telegram approval screenshots. Close requests are reduce-only and use the
+tracked virtual leg quantities.
+
 ## Live Clicks
 
 Only after screenshots and selectors are verified:

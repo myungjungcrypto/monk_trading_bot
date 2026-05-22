@@ -126,6 +126,22 @@ class TestPositionManagerState:
         assert updated.total_pnl_usd == pytest.approx(10.0)
         assert updated.net_pnl_usd == pytest.approx(9.80)
 
+    def test_virtual_pair_can_use_external_quantities(self):
+        pm = PositionManager()
+        trade = pm.open_virtual_pair(
+            exchange_name="variational_browser",
+            direction=PairDirection.SHORT_BTC_LONG_ETH,
+            size_usd=50,
+            btc_price=77000,
+            eth_price=2100,
+            btc_quantity=0.000646,
+            eth_quantity=0.0235,
+        )
+
+        assert trade is not None
+        assert trade.btc_leg.quantity == pytest.approx(0.000646)
+        assert trade.eth_leg.quantity == pytest.approx(0.0235)
+
     def test_close_virtual_pair_moves_trade_to_closed_state(self):
         pm = PositionManager()
         trade = pm.open_virtual_pair(

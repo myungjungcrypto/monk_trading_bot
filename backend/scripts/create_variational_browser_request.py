@@ -24,11 +24,9 @@ ROOT = Path(__file__).resolve().parents[2]
 VARIATIONAL_BROWSER_DIR = ROOT / "tools" / "variational-browser"
 DEFAULT_REQUEST_DIR = VARIATIONAL_BROWSER_DIR / "runtime" / "requests"
 
-load_dotenv(ROOT / "backend" / ".env")
-load_dotenv(VARIATIONAL_BROWSER_DIR / ".env", override=True)
-
-
 async def main() -> None:
+    load_dotenv(ROOT / "backend" / ".env")
+    load_dotenv(VARIATIONAL_BROWSER_DIR / ".env", override=True)
     args = parse_args()
     oracle = FairPriceOracle()
     fair_prices = await oracle.fetch(["BTC", "ETH"])
@@ -60,7 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--legs", choices=["both", "BTC", "ETH"], default="both")
     parser.add_argument("--confirm-selector", default=os.getenv("VARIATIONAL_BROWSER_CONFIRM_SELECTOR", "auto"))
     parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=env_bool("VARIATIONAL_BROWSER_DRY_RUN", True))
-    parser.add_argument("--request-dir", default=str(DEFAULT_REQUEST_DIR))
+    parser.add_argument("--request-dir", default=os.getenv("VARIATIONAL_BROWSER_REQUEST_DIR", str(DEFAULT_REQUEST_DIR)))
     parser.add_argument("--steps-json", default="")
     parser.add_argument("--max-age-sec", type=int, default=int(os.getenv("VARIATIONAL_REQUEST_MAX_AGE_SEC", "300")))
     parser.add_argument("--approval-timeout-sec", type=int, default=int(os.getenv("VARIATIONAL_BROWSER_APPROVAL_TIMEOUT_SEC", "120")))

@@ -36,6 +36,11 @@ from backend.bot.signal import (
 )
 from backend.bot.telegram_notifier import TelegramNotifier
 from backend.bot.trade_recorder import TradeRecorder
+from backend.bot.variational.browser_requests import (
+    VariationalBrowserRequestBatch,
+    VariationalBrowserRequestBridge,
+    request_quantity,
+)
 from backend.bot.warmup import warmup
 
 logger = logging.getLogger(__name__)
@@ -43,7 +48,9 @@ logger = logging.getLogger(__name__)
 EXECUTION_ALERT_ONLY = "alert_only"
 EXECUTION_PAPER = "paper"
 EXECUTION_LIVE = "live"
+EXECUTION_VARIATIONAL_BROWSER = "variational_browser"
 VIRTUAL_EXCHANGE_NAME = "virtual"
+VARIATIONAL_BROWSER_EXCHANGE_NAME = "variational_browser"
 
 
 @dataclass
@@ -110,6 +117,11 @@ class BotEngine:
             self.config.paper_trading,
         )
         self.telegram = TelegramNotifier.from_env()
+        self.variational_bridge: Optional[VariationalBrowserRequestBridge] = (
+            VariationalBrowserRequestBridge()
+            if self.execution_mode == EXECUTION_VARIATIONAL_BROWSER
+            else None
+        )
 
         if self._uses_virtual_positions:
             # Repeated averaging/reduction alerts are not useful before live orders.
@@ -138,13 +150,19 @@ class BotEngine:
     @staticmethod
     def _normalize_execution_mode(mode: str, paper_trading: bool) -> str:
         normalized = (mode or "").lower().strip()
-        if normalized in {EXECUTION_ALERT_ONLY, EXECUTION_PAPER, EXECUTION_LIVE}:
+        if normalized in {EXECUTION_ALERT_ONLY, EXECUTION_PAPER, EXECUTION_LIVE, EXECUTION_VARIATIONAL_BROWSER}:
             return normalized
         return EXECUTION_PAPER if paper_trading else EXECUTION_LIVE
 
     @property
     def _uses_virtual_positions(self) -> bool:
-        return self.execution_mode in {EXECUTION_ALERT_ONLY, EXECUTION_PAPER}
+        return self.execution_mode in {EXECUTION_ALERT_ONLY, EXECUTION_PAPER, EXECUTION_VARIATIONAL_BROWSER}
+
+    @property
+    def _virtual_exchange_name(self) -> str:
+        if self.execution_mode == EXECUTION_VARIATIONAL_BROWSER:
+            return VARIATIONAL_BROWSER_EXCHANGE_NAME
+        return VIRTUAL_EXCHANGE_NAME
 
     @property
     def is_running(self) -> bool:
@@ -157,7 +175,7 @@ class BotEngine:
         if self.trade_recorder is None:
             return
 
-        exchange_name = VIRTUAL_EXCHANGE_NAME if self._uses_virtual_positions else (
+        exchange_name = self._virtual_exchange_name if self._uses_virtual_positions else (
             self._primary_exchange.name if self._primary_exchange else None
         )
         if exchange_name is None:
@@ -433,7 +451,7 @@ class BotEngine:
                             await asyncio.sleep(self.config.position_check_interval)
                             continue
                         self.position_manager.update_virtual_positions(
-                            VIRTUAL_EXCHANGE_NAME,
+                            self._virtual_exchange_name,
                             btc_price,
                             eth_price,
                         )
@@ -522,9 +540,25 @@ class BotEngine:
                 eth_price=eth_price,
             )
 
+        variational_entry_batch: Optional[VariationalBrowserRequestBatch] = None
+        if self.variational_bridge:
+            try:
+                variational_entry_batch = await self.variational_bridge.create_entry_requests(
+                    direction=direction,
+                    size_usd=self.config.position_size_usd,
+                    zscore=signal.zscore_5m,
+                    divergence_pct=signal.divergence_pct,
+                )
+                await self._notify_variational_requests("entry", variational_entry_batch)
+            except Exception as e:
+                logger.error("Failed to create Variational entry requests: %s", e, exc_info=True)
+                if self.telegram:
+                    await self.telegram.error("Variational entry request failed", str(e))
+                return
+
         if self._uses_virtual_positions:
             trade = self.position_manager.open_virtual_pair(
-                exchange_name=VIRTUAL_EXCHANGE_NAME,
+                exchange_name=self._virtual_exchange_name,
                 direction=direction,
                 size_usd=self.config.position_size_usd,
                 btc_price=btc_price,
@@ -533,6 +567,8 @@ class BotEngine:
                 spread_pct=signal.divergence_pct,
                 taker_fee_bps=self.config.taker_fee_bps,
                 slippage_bps=self.config.slippage_bps,
+                btc_quantity=request_quantity(variational_entry_batch, "BTC"),
+                eth_quantity=request_quantity(variational_entry_batch, "ETH"),
             )
             if trade:
                 if self.trade_recorder:
@@ -591,6 +627,23 @@ class BotEngine:
         logger.info("EXIT: %s | reason=%s | %s", trade_id, reason.value, message)
 
         if self._uses_virtual_positions:
+            if self.variational_bridge:
+                open_trade = self.position_manager.open_trades.get(trade_id)
+                if open_trade is None:
+                    logger.warning("Virtual trade not found for Variational close request: %s", trade_id)
+                    return
+                try:
+                    close_batch = await self.variational_bridge.create_close_requests(
+                        trade=open_trade,
+                        reason=reason.value,
+                    )
+                    await self._notify_variational_requests("close", close_batch)
+                except Exception as e:
+                    logger.error("Failed to create Variational close requests: %s", e, exc_info=True)
+                    if self.telegram:
+                        await self.telegram.error("Variational close request failed", str(e))
+                    return
+
             trade = self.position_manager.close_virtual_pair(trade_id, reason.value)
             if trade:
                 self.risk_manager.on_trade_closed(trade_id, trade.net_pnl_usd)
@@ -639,6 +692,28 @@ class BotEngine:
                     pnl_pct=trade.pnl_pct,
                     direction=trade.direction.value if hasattr(trade, 'direction') else "",
                 )
+
+    async def _notify_variational_requests(
+        self,
+        label: str,
+        batch: VariationalBrowserRequestBatch,
+    ) -> None:
+        logger.info(
+            "Variational Browser %s requests queued: %s",
+            label,
+            ", ".join(str(path) for path in batch.paths),
+        )
+        if not self.telegram:
+            return
+        await self.telegram.status(
+            "\n".join([
+                f"Variational Browser {label} requests queued",
+                f"action: {batch.action}",
+                "files:",
+                *[str(path) for path in batch.paths],
+                "Run tools/variational-browser daemon to process them.",
+            ])
+        )
 
     # ── 리스크 액션 처리 ─────────────────────────────────────
 
