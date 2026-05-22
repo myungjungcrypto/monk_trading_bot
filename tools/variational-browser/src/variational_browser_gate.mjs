@@ -1072,7 +1072,7 @@ async function run() {
     } else if (args.status) {
       await gate.statusCurrentPage();
     } else if (args.request) {
-      await gate.processRequestFile(path.resolve(ROOT, args.request));
+      await gate.processRequestFile(resolveRequestPath(args.request));
     } else if (args.approveClick) {
       await gate.approveCurrentPage();
     } else if (args.daemon) {
@@ -1092,6 +1092,18 @@ async function run() {
       await gate.stop();
     }
   }
+}
+
+function resolveRequestPath(value) {
+  if (path.isAbsolute(value)) return value;
+
+  const fromCwd = path.resolve(process.cwd(), value);
+  if (fs.existsSync(fromCwd)) return fromCwd;
+
+  const fromRoot = path.resolve(ROOT, value);
+  if (fs.existsSync(fromRoot)) return fromRoot;
+
+  return fromCwd;
 }
 
 run().catch((error) => {
