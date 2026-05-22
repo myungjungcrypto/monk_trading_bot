@@ -164,8 +164,10 @@ sends the approval screenshot. The selectors are configurable through
 `VARIATIONAL_BROWSER_SIZE_INPUT_SELECTORS`. If the Buy/Sell text nodes are not
 discoverable in Variational's rendered DOM, the gate can fall back to viewport
 click points through `VARIATIONAL_BROWSER_BUY_FALLBACK_POINT` and
-`VARIATIONAL_BROWSER_SELL_FALLBACK_POINT`; keep this in dry-run until the
-Telegram screenshot confirms the correct side is selected.
+`VARIATIONAL_BROWSER_SELL_FALLBACK_POINT`. If the Size field is not a normal
+DOM input, it can fall back to `VARIATIONAL_BROWSER_SIZE_FALLBACK_POINT` and
+type the generated quantity there. Keep this in dry-run until the Telegram
+screenshot confirms the correct side and size are selected.
 
 Process one request:
 

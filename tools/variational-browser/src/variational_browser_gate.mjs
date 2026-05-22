@@ -562,12 +562,7 @@ class VariationalBrowserGate {
     await this.page.waitForTimeout(300);
 
     console.log("[Variational Browser] filling size input...");
-    const filledSelector = await this.fillFirstAvailable(
-      this.config.orderSizeInputSelectors,
-      quantity,
-      "size input",
-      this.config.orderInputTimeoutMs,
-    );
+    const filledSelector = await this.fillOrderSize(quantity);
     await this.page.waitForTimeout(this.config.orderSetupDelayMs);
     console.log(`[Variational Browser] order panel set: side_selector=${clickedSide} size_selector=${filledSelector}`);
 
@@ -589,6 +584,30 @@ class VariationalBrowserGate {
     const y = Math.round(viewport.height * point.y);
     console.log(`[Variational Browser] ${side} selector not found; clicking fallback point x=${x} y=${y}`);
     await this.page.mouse.click(x, y);
+    return `fallback:${point.x},${point.y}`;
+  }
+
+  async fillOrderSize(quantity) {
+    const selector = await this.fillFirstAvailableOptional(
+      this.config.orderSizeInputSelectors,
+      quantity,
+      "size input",
+      this.config.orderInputTimeoutMs,
+    );
+    if (selector) return selector;
+
+    if (!this.config.orderSizeFallbackEnabled) {
+      throw new Error(`Could not fill size input. Tried: ${this.config.orderSizeInputSelectors.join(", ")}`);
+    }
+
+    const viewport = this.page.viewportSize() || this.config.viewport;
+    const point = this.config.orderSizeFallbackPoint;
+    const x = Math.round(viewport.width * point.x);
+    const y = Math.round(viewport.height * point.y);
+    console.log(`[Variational Browser] size input selector not found; typing via fallback point x=${x} y=${y}`);
+    await this.page.mouse.click(x, y);
+    await this.page.keyboard.press("Control+A");
+    await this.page.keyboard.type(String(quantity));
     return `fallback:${point.x},${point.y}`;
   }
 
@@ -770,6 +789,29 @@ class VariationalBrowserGate {
     throw new Error(`Could not fill ${label}. Tried: ${selectors.join(", ")}`);
   }
 
+  async fillFirstAvailableOptional(selectors, value, label, timeoutMs = 3000) {
+    for (const selector of selectors) {
+      const locator = this.page.locator(selector).first();
+      try {
+        await locator.waitFor({ state: "visible", timeout: timeoutMs });
+        await locator.fill(String(value), { timeout: timeoutMs });
+        return selector;
+      } catch {
+        try {
+          await locator.waitFor({ state: "visible", timeout: timeoutMs });
+          await locator.click();
+          await this.page.keyboard.press("Control+A");
+          await this.page.keyboard.type(String(value));
+          return selector;
+        } catch {
+          // Try next selector.
+        }
+      }
+    }
+    console.log(`[Variational Browser] ${label} selector not found. Tried: ${selectors.join(", ")}`);
+    return "";
+  }
+
   async extractWalletConnectUri() {
     if (this.config.walletConnectUriSelector) {
       const locator = this.page.locator(this.config.walletConnectUriSelector).first();
@@ -934,6 +976,8 @@ function loadConfig() {
     orderSideFallbackEnabled: envBool("VARIATIONAL_BROWSER_SIDE_FALLBACK_ENABLED", true),
     orderBuyFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_BUY_FALLBACK_POINT", "0.82,0.186")),
     orderSellFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_SELL_FALLBACK_POINT", "0.94,0.186")),
+    orderSizeFallbackEnabled: envBool("VARIATIONAL_BROWSER_SIZE_FALLBACK_ENABLED", true),
+    orderSizeFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_SIZE_FALLBACK_POINT", "0.93,0.292")),
     walletConnectUriSelector: env("VARIATIONAL_BROWSER_WC_URI_SELECTOR"),
     telegramToken: requireEnv("VARIATIONAL_BROWSER_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"),
     telegramChatId: requireEnv("VARIATIONAL_BROWSER_TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID"),
