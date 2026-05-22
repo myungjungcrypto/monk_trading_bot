@@ -314,6 +314,18 @@ APR 환산:
 - `zscore_exit_min_pnl_pct=0`은 너무 약하다. 최소 0.05% 순수익 버퍼를 둔다.
 - `min_hold_minutes=120`은 강제 청산 시간이 아니라 Z-score 수렴 청산을 허용하기 전 최소 보유 시간이다. 강제 시간 청산은 `max_hold_hours=12`이며, `max_hold_hours <= 0`이면 시간청산을 끈다.
 
+### Startup Warmup
+
+운영 중 `PRIMARY_EXCHANGE=lighter`를 쓰더라도 시작 직후 5분봉/1시간봉 warmup은 Binance Futures klines를 우선 사용한다.
+Lighter REST kline API가 403을 반환하면 봇이 `data=0/50` 상태로 오래 대기하기 때문에, 테스트/운영 재시작 시에는 Binance 히스토리로 `PriceBuffer`와 `SignalEngine`을 먼저 채운다. 실시간 가격 스트림과 주문 실행 venue는 별도 설정을 따른다.
+
+```env
+WARMUP_BINANCE_ENABLED=true
+WARMUP_BINANCE_FIRST=true
+WARMUP_BINANCE_TIMEOUT_SEC=10
+WARMUP_BINANCE_KLINES_URL=https://fapi.binance.com/fapi/v1/klines
+```
+
 ---
 
 ## 6. 거래소별 포지션 설정

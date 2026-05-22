@@ -7,13 +7,19 @@ PriceBuffer와 SignalEngine을 즉시 사용 가능 상태로 만듭니다.
 
 import asyncio
 import logging
+import os
 from typing import Any, Dict, List
+
+import aiohttp
 
 from backend.bot.exchanges.base import BaseExchange
 from backend.bot.price_buffer import Candle, PriceBuffer
 from backend.bot.signal import MultiTimeframeSignalEngine
 
 logger = logging.getLogger(__name__)
+
+BINANCE_FAPI_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
+BINANCE_WARMUP_SYMBOLS = {"BTC": "BTCUSDT", "ETH": "ETHUSDT"}
 
 
 async def warmup(
@@ -41,8 +47,8 @@ async def warmup(
 
     try:
         # 5분봉 200개 (≈16시간), 1시간봉 100개 (≈4일)
-        btc_5m, eth_5m, btc_1h, eth_1h = await _fetch_klines(
-            exchange, btc_sym, eth_sym,
+        source, btc_5m, eth_5m, btc_1h, eth_1h = await _fetch_warmup_klines(
+            exchange, btc_sym, eth_sym, exchange_name,
         )
 
         if not btc_5m or not eth_5m:
@@ -59,8 +65,9 @@ async def warmup(
         _prefill_spreads(signal_engine, price_buffer)
 
         logger.info(
-            "Warmup complete: 5m=%d/%d candles, 1h=%d/%d candles, "
+            "Warmup complete from %s: 5m=%d/%d candles, 1h=%d/%d candles, "
             "spread_5m=%d, spread_1h=%d",
+            source,
             len(price_buffer.btc.candles_5m), len(price_buffer.eth.candles_5m),
             len(price_buffer.btc.candles_1h), len(price_buffer.eth.candles_1h),
             len(signal_engine._spread_5m), len(signal_engine._spread_1h),
@@ -70,6 +77,39 @@ async def warmup(
     except Exception as e:
         logger.error("Warmup failed: %s (%s)", e, type(e).__name__, exc_info=True)
         return False
+
+
+async def _fetch_warmup_klines(
+    exchange: BaseExchange,
+    btc_sym: str,
+    eth_sym: str,
+    exchange_name: str,
+) -> tuple[str, list[Candle], list[Candle], list[Candle], list[Candle]]:
+    """Binance Futures를 우선 사용하고, 실패 시 활성 거래소로 fallback."""
+    attempts = []
+    binance_enabled = _env_bool("WARMUP_BINANCE_ENABLED", True)
+    binance_first = _env_bool("WARMUP_BINANCE_FIRST", True)
+
+    if binance_enabled and binance_first:
+        attempts.append(("binance", _fetch_binance_klines))
+
+    attempts.append((exchange_name, lambda: _fetch_klines(exchange, btc_sym, eth_sym)))
+
+    if binance_enabled and not binance_first:
+        attempts.append(("binance", _fetch_binance_klines))
+
+    for source, fetcher in attempts:
+        btc_5m, eth_5m, btc_1h, eth_1h = await fetcher()
+        if btc_5m and eth_5m:
+            logger.info("Warmup: using %s klines", source)
+            return source, btc_5m, eth_5m, btc_1h, eth_1h
+
+        logger.warning(
+            "Warmup: %s 5m klines incomplete (BTC=%d, ETH=%d)",
+            source, len(btc_5m), len(eth_5m),
+        )
+
+    return "", [], [], [], []
 
 
 async def _fetch_one(
@@ -120,6 +160,53 @@ async def _fetch_klines(
     return btc_5m, eth_5m, btc_1h, eth_1h
 
 
+async def _fetch_binance_klines() -> tuple[list[Candle], list[Candle], list[Candle], list[Candle]]:
+    """Binance USD-M Futures에서 warmup용 5분봉/1시간봉을 가져옵니다."""
+    timeout = aiohttp.ClientTimeout(total=float(os.getenv("WARMUP_BINANCE_TIMEOUT_SEC", "10")))
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        btc_5m, eth_5m, btc_1h, eth_1h = await asyncio.gather(
+            _fetch_binance_one(session, BINANCE_WARMUP_SYMBOLS["BTC"], "5m", 200, "Binance BTC 5m"),
+            _fetch_binance_one(session, BINANCE_WARMUP_SYMBOLS["ETH"], "5m", 200, "Binance ETH 5m"),
+            _fetch_binance_one(session, BINANCE_WARMUP_SYMBOLS["BTC"], "1h", 100, "Binance BTC 1h"),
+            _fetch_binance_one(session, BINANCE_WARMUP_SYMBOLS["ETH"], "1h", 100, "Binance ETH 1h"),
+        )
+    return btc_5m, eth_5m, btc_1h, eth_1h
+
+
+async def _fetch_binance_one(
+    session: aiohttp.ClientSession,
+    symbol: str,
+    interval: str,
+    limit: int,
+    label: str,
+) -> list[Candle]:
+    """단일 Binance kline 요청 + 에러 핸들링."""
+    try:
+        url = os.getenv("WARMUP_BINANCE_KLINES_URL", BINANCE_FAPI_KLINES_URL)
+        async with session.get(url, params={"symbol": symbol, "interval": interval, "limit": limit}) as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                raise RuntimeError(f"HTTP {resp.status}: {body[:200]}")
+            raw = await resp.json()
+
+        if not isinstance(raw, list):
+            logger.warning("Warmup: %s unexpected response: %s", label, repr(raw)[:200])
+            return []
+
+        candles = _binance_klines_to_candles(raw)
+        logger.info(
+            "Warmup: loaded %d %s candles (first close=%.2f, last close=%.2f)",
+            len(candles), label,
+            candles[0].close if candles else 0,
+            candles[-1].close if candles else 0,
+        )
+        return candles
+
+    except Exception as e:
+        logger.warning("Warmup: %s fetch failed: %s (%s)", label, e, type(e).__name__)
+        return []
+
+
 def _klines_to_candles(klines: List[Dict[str, Any]]) -> list[Candle]:
     """거래소 kline 응답을 Candle 리스트로 변환."""
     candles = []
@@ -139,6 +226,34 @@ def _klines_to_candles(klines: List[Dict[str, Any]]) -> list[Candle]:
             logger.warning("Warmup: skipping malformed kline: %s (error: %s)", repr(k)[:100], e)
             continue
     return candles
+
+
+def _binance_klines_to_candles(klines: List[List[Any]]) -> list[Candle]:
+    """Binance USD-M Futures kline 배열 응답을 Candle 리스트로 변환."""
+    candles = []
+    for k in klines:
+        try:
+            candles.append(Candle(
+                open_time=int(k[0]),
+                close_time=int(k[6]),
+                open=float(k[1]),
+                high=float(k[2]),
+                low=float(k[3]),
+                close=float(k[4]),
+                volume=int(float(k[5])),
+                is_closed=True,
+            ))
+        except (TypeError, ValueError, IndexError) as e:
+            logger.warning("Warmup: skipping malformed Binance kline: %s (error: %s)", repr(k)[:100], e)
+            continue
+    return candles
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _inject_candles(buffer, candles: list[Candle]) -> None:
