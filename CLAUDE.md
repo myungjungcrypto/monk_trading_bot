@@ -679,7 +679,7 @@ python -m backend.scripts.create_variational_browser_request \
 - `LONG_BTC_SHORT_ETH` → BTC Buy 요청 + ETH Sell 요청
 - `SHORT_BTC_LONG_ETH` → BTC Sell 요청 + ETH Buy 요청
 
-각 요청의 `variationalOrder.quantity`는 Binance/Lighter/Hyperliquid median fair price 기준으로 `size_usd / fair_price`를 계산한다. 기본값은 dry-run이다.
+각 요청의 `variationalOrder.quantity`는 Binance/Lighter/Hyperliquid median fair price 기준으로 `size_usd / fair_price`를 계산한다. 기본값은 dry-run이고, 두 다리를 텔레그램으로 순차 승인할 수 있도록 생성 요청에는 기본 `maxAgeSec=300`을 넣는다. 값은 `VARIATIONAL_REQUEST_MAX_AGE_SEC` 또는 `--max-age-sec`로 조정한다.
 
 단일 다리 selector만 테스트할 때:
 

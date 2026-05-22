@@ -188,8 +188,10 @@ python -m backend.scripts.create_variational_browser_request \
 The generator creates one request per leg by default. For
 `LONG_BTC_SHORT_ETH`, that means a BTC Buy request and an ETH Sell request. The
 request summary and `variationalOrder.quantity` use external median fair prices,
-not Variational's screen price. The requests stay dry-run by default. To create
-only one leg while testing selectors:
+not Variational's screen price. The requests stay dry-run by default. Generated
+requests include `maxAgeSec` from `VARIATIONAL_REQUEST_MAX_AGE_SEC` and default
+to 300 seconds so both legs can be approved sequentially. To create only one leg
+while testing selectors:
 
 ```bash
 python -m backend.scripts.create_variational_browser_request \

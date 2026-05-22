@@ -55,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--request-dir", default=str(DEFAULT_REQUEST_DIR))
     parser.add_argument("--steps-json", default="")
+    parser.add_argument("--max-age-sec", type=int, default=int(os.getenv("VARIATIONAL_REQUEST_MAX_AGE_SEC", "300")))
     parser.add_argument("--btc-qty-decimals", type=int, default=6)
     parser.add_argument("--eth-qty-decimals", type=int, default=4)
     return parser.parse_args()
@@ -95,6 +96,7 @@ def build_requests(args: argparse.Namespace, fair_prices: dict) -> list[dict]:
             "summary": summary,
             "confirmSelector": args.confirm_selector,
             "dryRun": args.dry_run,
+            "maxAgeSec": args.max_age_sec,
             "steps": steps,
             "variationalOrder": {
                 "symbol": symbol,
