@@ -45,6 +45,7 @@ class TelegramApprovalClient {
     this.offset = 0;
     this.pending = new Map();
     this.running = false;
+    this.pollAbortController = null;
   }
 
   start() {
@@ -54,6 +55,14 @@ class TelegramApprovalClient {
       console.error("[telegram] polling stopped:", error);
       this.running = false;
     });
+  }
+
+  stop() {
+    this.running = false;
+    if (this.pollAbortController) {
+      this.pollAbortController.abort();
+      this.pollAbortController = null;
+    }
   }
 
   async sendMessage(text, inlineKeyboard = undefined) {
@@ -124,12 +133,13 @@ class TelegramApprovalClient {
           offset: this.offset,
           timeout: 25,
           allowed_updates: ["callback_query"],
-        });
+        }, { abortable: true });
         for (const update of result.result || []) {
           this.offset = Math.max(this.offset, update.update_id + 1);
           await this.handleUpdate(update);
         }
       } catch (error) {
+        if (!this.running) return;
         console.warn("[telegram] poll error:", error.message);
         await sleep(3000);
       }
@@ -174,18 +184,30 @@ class TelegramApprovalClient {
     });
   }
 
-  async call(method, payload) {
+  async call(method, payload, { abortable = false } = {}) {
     const url = `https://api.telegram.org/bot${this.token}/${method}`;
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const data = await response.json();
-    if (!response.ok || data.ok === false) {
-      throw new Error(`${method} failed: ${response.status} ${JSON.stringify(data).slice(0, 500)}`);
+    let controller = null;
+    if (abortable) {
+      controller = new AbortController();
+      this.pollAbortController = controller;
     }
-    return data;
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: controller?.signal,
+      });
+      const data = await response.json();
+      if (!response.ok || data.ok === false) {
+        throw new Error(`${method} failed: ${response.status} ${JSON.stringify(data).slice(0, 500)}`);
+      }
+      return data;
+    } finally {
+      if (controller && this.pollAbortController === controller) {
+        this.pollAbortController = null;
+      }
+    }
   }
 
   async callMultipart(method, form) {
@@ -231,6 +253,7 @@ class VariationalBrowserGate {
   }
 
   async stop() {
+    this.telegram.stop();
     if (this.context) {
       await this.context.close();
     }
