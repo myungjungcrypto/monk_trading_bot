@@ -54,7 +54,8 @@ def test_bridge_writes_entry_requests(tmp_path):
         )
 
         assert batch.action == "open"
-        assert len(batch.paths) == 2
+        assert len(batch.paths) == 1
+        assert len(batch.requests) == 2
         assert all(path.exists() for path in batch.paths)
         btc = next(r for r in batch.requests if r["variationalOrder"]["symbol"] == "BTC")
         eth = next(r for r in batch.requests if r["variationalOrder"]["symbol"] == "ETH")
@@ -64,7 +65,9 @@ def test_bridge_writes_entry_requests(tmp_path):
         assert request_quantity(batch, "ETH") == 0.025
 
         saved = json.loads(batch.paths[0].read_text())
-        assert saved["id"] == batch.requests[0]["id"]
+        assert saved["id"] == batch.requests[0]["id"].rsplit("-", 1)[0]
+        assert len(saved["variationalBatch"]) == 2
+        assert saved["signal"]["action"] == "open"
 
     asyncio.run(run())
 
@@ -102,6 +105,14 @@ def test_bridge_writes_reduce_only_close_requests(tmp_path):
         assert eth["variationalOrder"]["side"] == "SELL"
         assert eth["variationalOrder"]["quantity"] == "0.0235"
         assert eth["variationalOrder"]["reduceOnly"] is True
+
+        saved = json.loads(batch.paths[0].read_text())
+        assert len(batch.paths) == 1
+        assert saved["signal"]["action"] == "close"
+        assert all(
+            request["variationalOrder"]["reduceOnly"]
+            for request in saved["variationalBatch"]
+        )
 
     asyncio.run(run())
 

@@ -39,6 +39,7 @@ class VariationalBrowserRequestConfig:
     legs: str = "both"
     btc_qty_decimals: int = 6
     eth_qty_decimals: int = 4
+    batch_requests: bool = True
 
     @classmethod
     def from_env(cls) -> "VariationalBrowserRequestConfig":
@@ -57,6 +58,7 @@ class VariationalBrowserRequestConfig:
             legs=os.getenv("VARIATIONAL_BROWSER_ENGINE_LEGS", "both"),
             btc_qty_decimals=int(os.getenv("VARIATIONAL_BROWSER_BTC_QTY_DECIMALS", "6")),
             eth_qty_decimals=int(os.getenv("VARIATIONAL_BROWSER_ETH_QTY_DECIMALS", "4")),
+            batch_requests=env_bool("VARIATIONAL_BROWSER_BATCH_REQUESTS", True),
         )
 
 
@@ -167,6 +169,12 @@ class VariationalBrowserRequestBridge:
 
     def write_requests(self, requests: List[dict]) -> List[Path]:
         self.config.request_dir.mkdir(parents=True, exist_ok=True)
+        if self.config.batch_requests and len(requests) > 1:
+            batch = _build_batch_request(requests)
+            path = self.config.request_dir / f"{batch['id']}.json"
+            path.write_text(json.dumps(batch, indent=2, ensure_ascii=False), encoding="utf-8")
+            return [path]
+
         paths = []
         for request in requests:
             path = self.config.request_dir / f"{request['id']}.json"
@@ -233,21 +241,22 @@ class VariationalBrowserRequestBridge:
             except Exception:
                 continue
 
-            order = request.get("variationalOrder") or {}
-            if str(order.get("action", "open")).lower() != "open":
-                continue
-            pair_direction = order.get("pairDirection") or request.get("signal", {}).get("direction")
-            if str(pair_direction) != direction.value:
-                continue
+            for leg_request in _iter_leg_requests(request):
+                order = leg_request.get("variationalOrder") or {}
+                if str(order.get("action", "open")).lower() != "open":
+                    continue
+                pair_direction = order.get("pairDirection") or leg_request.get("signal", {}).get("direction")
+                if str(pair_direction) != direction.value:
+                    continue
 
-            created_ts = _to_timestamp(request.get("createdAt"))
-            if created_ts <= 0 or abs(opened_ts - created_ts) > window_sec:
-                continue
+                created_ts = _to_timestamp(leg_request.get("createdAt") or request.get("createdAt"))
+                if created_ts <= 0 or abs(opened_ts - created_ts) > window_sec:
+                    continue
 
-            symbol = str(order.get("symbol", "")).upper()
-            if symbol not in {"BTC", "ETH"}:
-                continue
-            statuses[symbol] = request_file_status(path)
+                symbol = str(order.get("symbol", "")).upper()
+                if symbol not in {"BTC", "ETH"}:
+                    continue
+                statuses[symbol] = request_file_status(path)
 
         return statuses
 
@@ -262,6 +271,65 @@ def request_quantity(batch: Optional[VariationalBrowserRequestBatch], symbol: st
             quantity = order.get("quantity")
             return float(quantity) if quantity else None
     return None
+
+
+def _build_batch_request(requests: List[dict]) -> dict:
+    first = requests[0]
+    orders = [request.get("variationalOrder") or {} for request in requests]
+    action = str(orders[0].get("action", "open")).lower()
+    direction = orders[0].get("pairDirection") or first.get("signal", {}).get("direction")
+    summary_lines = [
+        f"Variational browser batch request: {direction}",
+        f"action: {action}",
+        "legs:",
+    ]
+    for order in orders:
+        summary_lines.append(
+            "  - {symbol} {side} qty={qty} reduce_only={reduce}".format(
+                symbol=order.get("symbol"),
+                side=order.get("side"),
+                qty=order.get("quantity"),
+                reduce=order.get("reduceOnly"),
+            )
+        )
+    fair = first.get("signal", {}).get("fair_price", {})
+    if fair:
+        summary_lines.append("decision_price: external median fair price, not Variational screen price")
+
+    return {
+        "id": str(first["id"]).rsplit("-", 1)[0],
+        "createdAt": first.get("createdAt"),
+        "summary": "\n".join(summary_lines),
+        "confirmSelector": first.get("confirmSelector", "auto"),
+        "dryRun": first.get("dryRun", True),
+        "maxAgeSec": first.get("maxAgeSec", 300),
+        "approvalTimeoutMs": max(int(request.get("approvalTimeoutMs", 120_000)) for request in requests),
+        "variationalBatch": requests,
+        "signal": {
+            "direction": direction,
+            "action": action,
+            "legs": [
+                {
+                    "symbol": order.get("symbol"),
+                    "side": order.get("side"),
+                    "quantity": order.get("quantity"),
+                    "reduce_only": order.get("reduceOnly"),
+                }
+                for order in orders
+            ],
+            "size_usd_per_leg": first.get("signal", {}).get("size_usd_per_leg"),
+            "zscore": first.get("signal", {}).get("zscore"),
+            "divergence_pct": first.get("signal", {}).get("divergence_pct"),
+            "fair_price": fair,
+        },
+    }
+
+
+def _iter_leg_requests(request: dict) -> List[dict]:
+    batch = request.get("variationalBatch")
+    if isinstance(batch, list):
+        return [item for item in batch if isinstance(item, dict)]
+    return [request]
 
 
 def _format_quantity(quantity: float, decimals: int) -> str:

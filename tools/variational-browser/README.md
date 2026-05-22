@@ -13,6 +13,9 @@ Default behavior is safe:
 - `VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY=true`: close requests that are
   explicitly `action=close` and `reduceOnly=true` are auto-clicked in live mode
   because they reduce exposure. Open requests still require Telegram approval.
+- `VARIATIONAL_BROWSER_BATCH_REQUESTS=true`: backend-created BTC/ETH legs are
+  written as one batch request file, so one approval covers both entry legs and
+  one automatic reduce-only flow closes both legs.
 - Persistent browser profile: login/session state is kept under
   `tools/variational-browser/runtime/profile`.
 - Screenshot before every approval or automatic reduce-only click.
@@ -168,6 +171,33 @@ Future signal bots can create request files:
 }
 ```
 
+Backend-generated pair trades use a batch request by default:
+
+```json
+{
+  "id": "variational-20260523T010203-abcd1234",
+  "createdAt": "2026-05-23T01:02:03.000Z",
+  "summary": "Variational browser batch request: SHORT_BTC_LONG_ETH",
+  "dryRun": false,
+  "variationalBatch": [
+    { "id": "...-btc", "variationalOrder": { "symbol": "BTC", "side": "SELL", "action": "open", "reduceOnly": false } },
+    { "id": "...-eth", "variationalOrder": { "symbol": "ETH", "side": "BUY", "action": "open", "reduceOnly": false } }
+  ]
+}
+```
+
+For open batches, the browser sends leg preview screenshots and then one
+Telegram `Click Pair` approval. After approval it sets up and clicks BTC/ETH
+sequentially. If the first entry leg clicks and a later leg fails, the browser
+attempts an immediate reduce-only rollback of the already-clicked entry leg and
+archives the batch as `rolledback` rather than `clicked`.
+
+For close batches, every leg must be `action=close` and `reduceOnly=true`.
+Those batches are auto-clicked when `VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY`
+is enabled. If one reduce-only close leg fails, the daemon keeps processing and
+retries failed legs up to `VARIATIONAL_BROWSER_REDUCE_ONLY_BATCH_RETRY_ATTEMPTS`
+times before reporting a partial failure.
+
 When `variationalOrder` is present, the gate navigates to the symbol page,
 selects Market, selects Buy/Sell, fills the Size input with `quantity`, then
 sends the approval screenshot. The selectors are configurable through
@@ -267,7 +297,10 @@ automatically. Keep the browser daemon running so those files are converted into
 Telegram approval screenshots. Close requests are reduce-only and use the
 tracked virtual leg quantities. If `VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY`
 is enabled, those close requests are clicked automatically after setup because
-they only reduce exposure.
+they only reduce exposure. With `VARIATIONAL_BROWSER_BATCH_REQUESTS=true`, the
+two BTC/ETH legs are written as a single batch file, preventing one leg from
+expiring before the other file is processed. Failed reduce-only close legs are
+retried before the daemon reports a partial failure.
 
 The daemon archives processed request files as `*.done`. Expired or malformed
 requests are archived as `*.expired.done` / `*.failed.done` so an old file cannot

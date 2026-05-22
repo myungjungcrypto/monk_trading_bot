@@ -463,6 +463,10 @@ class VariationalBrowserGate {
 
   async processRequest(request) {
     this.validateRequest(request);
+    if (Array.isArray(request.variationalBatch)) {
+      return this.processBatchRequest(request);
+    }
+
     const started = Date.now();
     console.log(`[Variational Browser] processing request: ${request.id || "(no id)"}`);
 
@@ -576,6 +580,242 @@ class VariationalBrowserGate {
     await this.telegram.sendPhoto(afterPath, `[Variational Browser] clicked\nid: ${request.id}`);
     console.log("[Variational Browser] final click completed");
     return { status: "clicked" };
+  }
+
+  async processBatchRequest(request) {
+    const legs = request.variationalBatch.filter((leg) => leg && typeof leg === "object");
+    if (!legs.length) {
+      throw new Error("variationalBatch must contain at least one leg request");
+    }
+
+    const autoReduceOnly = legs.every((leg) => this.shouldAutoClickReduceOnly(leg));
+    const dryRun = request.dryRun ?? this.config.dryRun;
+    const clickedLegs = [];
+    console.log(`[Variational Browser] processing batch request: ${request.id || "(no id)"} legs=${legs.length}`);
+
+    if (!autoReduceOnly) {
+      const previews = [];
+      for (const leg of legs) {
+        const preview = await this.prepareRequestPreview(leg, `${request.id || "batch"}-${leg.variationalOrder?.symbol || "leg"}-preview`);
+        previews.push({ leg, ...preview });
+        await this.telegram.sendPhoto(
+          preview.screenshotPath,
+          this.buildBatchPreviewCaption(leg, preview.confirmCandidates),
+        );
+      }
+
+      const decision = await this.telegram.requestApproval({
+        title: "[Variational Browser] PAIR ORDER CLICK REQUEST",
+        body: this.buildBatchApprovalBody(request, legs, previews),
+        approveLabel: "Click Pair",
+        rejectLabel: "Reject",
+        timeoutMs: Number(request.approvalTimeoutMs ?? this.config.approvalTimeoutMs),
+      });
+      if (!decision.approved) {
+        await this.telegram.sendMessage(`[Variational Browser] batch rejected\nid: ${request.id}\nreason: ${decision.reason}`);
+        console.log(`[Variational Browser] batch rejected: ${decision.reason}`);
+        return { status: "rejected", reason: decision.reason };
+      }
+    } else {
+      await this.telegram.sendMessage(this.buildAutoBatchReduceOnlyCaption(request, legs));
+    }
+
+    if (dryRun) {
+      await this.telegram.sendMessage(`[Variational Browser] batch dry-run, clicks skipped\nid: ${request.id}`);
+      console.log("[Variational Browser] batch dry-run, clicks skipped");
+      return { status: "dryrun" };
+    }
+
+    if (autoReduceOnly) {
+      const result = await this.clickAutoReduceOnlyBatch(legs, request);
+      if (result.failures.length) {
+        await this.telegram.sendMessage([
+          "[Variational Browser] batch reduce-only partially failed",
+          `id: ${request.id}`,
+          `clicked_legs: ${result.successes.map((leg) => leg.variationalOrder?.symbol).join(",") || "none"}`,
+          "failed_legs:",
+          ...result.failures.map(({ leg, error }) => `- ${leg.variationalOrder?.symbol || "leg"}: ${error.message}`),
+        ].join("\n"));
+        return {
+          status: result.successes.length ? "partial_failed" : "failed",
+          reason: result.failures.map(({ leg, error }) => `${leg.variationalOrder?.symbol || "leg"}=${error.message}`).join("; "),
+        };
+      }
+
+      await this.telegram.sendMessage(`[Variational Browser] batch clicked\nid: ${request.id}\nlegs: ${legs.length}`);
+      return { status: "clicked" };
+    }
+
+    try {
+      for (const leg of legs) {
+        await this.clickPreparedRequest(leg, {
+          screenshotPrefix: `${request.id || "batch"}-${leg.variationalOrder?.symbol || "leg"}`,
+          clickedCaption: "clicked",
+        });
+        clickedLegs.push(leg);
+      }
+    } catch (error) {
+      if (!autoReduceOnly && clickedLegs.length) {
+        await this.telegram.sendMessage([
+          "[Variational Browser] batch partially clicked; attempting rollback",
+          `id: ${request.id}`,
+          `clicked_legs: ${clickedLegs.map((leg) => leg.variationalOrder?.symbol).join(",")}`,
+          `error: ${error.message}`,
+        ].join("\n"));
+        const rollbackOk = await this.rollbackClickedOpenLegs(clickedLegs, request.id);
+        return { status: rollbackOk ? "rolledback" : "partial_failed", reason: error.message };
+      }
+      throw error;
+    }
+
+    await this.telegram.sendMessage(`[Variational Browser] batch clicked\nid: ${request.id}\nlegs: ${legs.length}`);
+    return { status: "clicked" };
+  }
+
+  async clickAutoReduceOnlyBatch(legs, request) {
+    const attempts = Math.max(1, Number(this.config.reduceOnlyBatchRetryAttempts || 1));
+    const delayMs = Math.max(0, Number(this.config.reduceOnlyBatchRetryDelayMs || 0));
+    const successes = [];
+    let pending = [...legs];
+    let failures = [];
+
+    for (let attempt = 1; attempt <= attempts && pending.length; attempt += 1) {
+      const nextPending = [];
+      failures = [];
+
+      for (const leg of pending) {
+        try {
+          if (attempt > 1) {
+            await this.telegram.sendMessage([
+              "[Variational Browser] retrying reduce-only leg",
+              `batch_id: ${request.id || ""}`,
+              `attempt: ${attempt}/${attempts}`,
+              `leg: ${leg.variationalOrder?.symbol || "leg"}`,
+            ].join("\n"));
+          }
+          await this.clickPreparedRequest(leg, {
+            screenshotPrefix: `${request.id || "batch"}-${leg.variationalOrder?.symbol || "leg"}-attempt${attempt}`,
+            clickedCaption: "reduce-only clicked",
+          });
+          successes.push(leg);
+        } catch (error) {
+          failures.push({ leg, error });
+          nextPending.push(leg);
+          await this.telegram.sendMessage([
+            "[Variational Browser] reduce-only leg failed",
+            `batch_id: ${request.id || ""}`,
+            `attempt: ${attempt}/${attempts}`,
+            `leg: ${leg.variationalOrder?.symbol || "leg"}`,
+            `error: ${error.message}`,
+          ].join("\n"));
+        }
+      }
+
+      pending = nextPending;
+      if (pending.length && attempt < attempts && delayMs > 0) {
+        await sleep(delayMs);
+      }
+    }
+
+    return { successes, failures };
+  }
+
+  async prepareRequestPreview(request, screenshotId) {
+    await this.prepareRequestPanel(request);
+    const screenshotPath = await this.captureScreenshot(screenshotId);
+    const confirmCandidates = await this.getConfirmCandidates(request.variationalOrder).catch((error) => {
+      console.warn("[Variational Browser] confirm candidate scan failed:", error.message);
+      return [];
+    });
+    return { screenshotPath, confirmCandidates };
+  }
+
+  async prepareRequestPanel(request) {
+    if (request.url) {
+      console.log(`[Variational Browser] opening: ${request.url}`);
+      await this.page.goto(request.url, { waitUntil: "domcontentloaded" });
+    }
+    await this.runSteps(request.beforeSteps || request.steps || []);
+    await this.page.waitForTimeout(Number(request.previewDelayMs ?? this.config.previewDelayMs));
+
+    console.log("[Variational Browser] checking wallet state...");
+    const walletState = await this.waitForRequestWalletReady();
+    console.log(`[Variational Browser] wallet stage: ${walletState.stage}`);
+    if (walletState.stage !== "ready") {
+      throw new Error(`wallet not ready: ${walletState.stage}`);
+    }
+
+    if (request.variationalOrder) {
+      console.log("[Variational Browser] setting up order panel...");
+      await this.setupVariationalOrder(request.variationalOrder);
+      await this.page.waitForTimeout(Number(request.previewDelayMs ?? this.config.previewDelayMs));
+      console.log("[Variational Browser] rechecking wallet state after order setup...");
+      const postSetupState = await this.waitForRequestWalletReady();
+      console.log(`[Variational Browser] wallet stage after setup: ${postSetupState.stage}`);
+      if (postSetupState.stage !== "ready") {
+        throw new Error(`wallet not ready after order setup: ${postSetupState.stage}`);
+      }
+    }
+  }
+
+  async clickPreparedRequest(request, { screenshotPrefix, clickedCaption }) {
+    const prepared = await this.prepareRequestPreview(request, `${screenshotPrefix}-before-click`);
+    await this.telegram.sendPhoto(
+      prepared.screenshotPath,
+      `[Variational Browser] prepared click\nid: ${request.id}\nleg: ${request.variationalOrder?.symbol || ""}`,
+    );
+    await this.clickConfirm(request, prepared.confirmCandidates);
+    await this.page.waitForTimeout(Number(request.afterClickDelayMs ?? this.config.afterClickDelayMs));
+    const afterPath = await this.captureScreenshot(`${screenshotPrefix}-after`);
+    await this.telegram.sendPhoto(
+      afterPath,
+      `[Variational Browser] ${clickedCaption}\nid: ${request.id}\nleg: ${request.variationalOrder?.symbol || ""}`,
+    );
+  }
+
+  async rollbackClickedOpenLegs(clickedLegs, batchId = "") {
+    let ok = true;
+    for (const leg of [...clickedLegs].reverse()) {
+      const rollback = this.buildRollbackCloseRequest(leg, batchId);
+      try {
+        await this.clickPreparedRequest(rollback, {
+          screenshotPrefix: `${batchId || "batch"}-${rollback.variationalOrder.symbol}-rollback`,
+          clickedCaption: "rollback reduce-only clicked",
+        });
+      } catch (error) {
+        ok = false;
+        await this.telegram.sendMessage([
+          "[Variational Browser] rollback failed",
+          `batch_id: ${batchId}`,
+          `leg: ${rollback.variationalOrder.symbol}`,
+          `error: ${error.message}`,
+        ].join("\n"));
+      }
+    }
+    return ok;
+  }
+
+  buildRollbackCloseRequest(leg, batchId = "") {
+    const order = leg.variationalOrder || {};
+    const closeSide = String(order.side || "").toUpperCase() === "BUY" ? "SELL" : "BUY";
+    return {
+      ...leg,
+      id: `${batchId || leg.id || "batch"}-${order.symbol || "leg"}-rollback`,
+      summary: [
+        "Rollback reduce-only close after partial batch entry",
+        leg.summary || "",
+      ].filter(Boolean).join("\n"),
+      variationalOrder: {
+        ...order,
+        side: closeSide,
+        action: "close",
+        reduceOnly: true,
+      },
+      signal: {
+        ...(leg.signal || {}),
+        action: "close",
+      },
+    };
   }
 
   validateRequest(request) {
@@ -1134,6 +1374,66 @@ class VariationalBrowserGate {
     }
     return lines.join("\n").slice(0, 1024);
   }
+
+  buildBatchPreviewCaption(request, confirmCandidates = []) {
+    const order = request.variationalOrder || {};
+    const lines = [
+      "[Variational Browser] PAIR LEG PREVIEW",
+      `id: ${request.id || ""}`,
+      `leg: ${order.symbol || ""} ${order.side || ""}`,
+      `quantity: ${order.quantity || ""}`,
+      `action: ${order.action || ""}`,
+      `reduce_only: ${order.reduceOnly === true}`,
+    ];
+    if (confirmCandidates.length) {
+      const candidate = confirmCandidates.find((item) => !item.disabled) || confirmCandidates[0];
+      lines.push(
+        "",
+        "confirm_button_candidate:",
+        `#${candidate.index} score=${candidate.score} disabled=${candidate.disabled} text="${candidate.text}"`,
+      );
+    }
+    return lines.join("\n").slice(0, 1024);
+  }
+
+  buildBatchApprovalBody(request, legs, previews = []) {
+    const lines = [
+      `id: ${request.id || ""}`,
+      `dry_run: ${request.dryRun ?? this.config.dryRun}`,
+      "",
+      request.summary || "No summary provided.",
+      "",
+      "legs:",
+    ];
+    for (const leg of legs) {
+      const order = leg.variationalOrder || {};
+      lines.push(`- ${order.symbol || ""} ${order.side || ""} qty=${order.quantity || ""} reduce_only=${order.reduceOnly === true}`);
+    }
+    if (previews.length) {
+      lines.push("", "preview_screenshots_sent: true");
+    }
+    if (request.signal) {
+      lines.push("", "signal:", JSON.stringify(request.signal, null, 2).slice(0, 1000));
+    }
+    return lines.join("\n").slice(0, 3500);
+  }
+
+  buildAutoBatchReduceOnlyCaption(request, legs) {
+    const lines = [
+      "[Variational Browser] AUTO PAIR REDUCE-ONLY",
+      `id: ${request.id || ""}`,
+      `dry_run: ${request.dryRun ?? this.config.dryRun}`,
+      "",
+      request.summary || "No summary provided.",
+      "",
+      "legs:",
+    ];
+    for (const leg of legs) {
+      const order = leg.variationalOrder || {};
+      lines.push(`- ${order.symbol || ""} ${order.side || ""} qty=${order.quantity || ""} reduce_only=${order.reduceOnly === true}`);
+    }
+    return lines.join("\n").slice(0, 3500);
+  }
 }
 
 function loadConfig() {
@@ -1153,6 +1453,8 @@ function loadConfig() {
     actionTimeoutMs: Number(env("VARIATIONAL_BROWSER_ACTION_TIMEOUT_SEC", "15000")),
     previewDelayMs: Number(env("VARIATIONAL_BROWSER_PREVIEW_DELAY_MS", "1000")),
     afterClickDelayMs: Number(env("VARIATIONAL_BROWSER_AFTER_CLICK_DELAY_MS", "3000")),
+    reduceOnlyBatchRetryAttempts: Number(env("VARIATIONAL_BROWSER_REDUCE_ONLY_BATCH_RETRY_ATTEMPTS", "3")),
+    reduceOnlyBatchRetryDelayMs: Number(env("VARIATIONAL_BROWSER_REDUCE_ONLY_BATCH_RETRY_DELAY_MS", "5000")),
     connectWaitMs: Number(env("VARIATIONAL_BROWSER_CONNECT_WAIT_SEC", "300")) * 1000,
     connectedStableMs: Number(env("VARIATIONAL_BROWSER_CONNECTED_STABLE_MS", "3000")),
     authenticateWaitMs: Number(env("VARIATIONAL_BROWSER_AUTHENTICATE_WAIT_SEC", "15")) * 1000,
