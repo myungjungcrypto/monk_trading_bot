@@ -681,6 +681,16 @@ python -m backend.scripts.create_variational_browser_request \
 
 각 요청의 `variationalOrder.quantity`는 Binance/Lighter/Hyperliquid median fair price 기준으로 `size_usd / fair_price`를 계산한다. 기본값은 dry-run이고, 두 다리를 텔레그램으로 순차 승인할 수 있도록 생성 요청에는 기본 `maxAgeSec=300`을 넣는다. 값은 `VARIATIONAL_REQUEST_MAX_AGE_SEC` 또는 `--max-age-sec`로 조정한다.
 
+청산 요청은 원래 진입 방향을 기준으로 `--action close`를 붙인다. 이때 스크립트가 다리 방향을 자동 반전하고 `reduceOnly=true`를 넣는다. 실제 포지션 수량과 정확히 맞추려면 `--btc-quantity` / `--eth-quantity`를 사용한다.
+
+```bash
+python -m backend.scripts.create_variational_browser_request \
+  --direction SHORT_BTC_LONG_ETH \
+  --action close \
+  --legs ETH \
+  --eth-quantity 0.0235
+```
+
 단일 다리 selector만 테스트할 때:
 
 ```bash
@@ -695,6 +705,7 @@ python -m backend.scripts.create_variational_browser_request \
 - 진입/청산 신호, 텔레그램 승인 요약, 주문 직전 sanity check는 외부 median fair price를 기준으로 한다.
 - 3개 중 1개 소스가 응답하지 않아도 2개 이상이면 진행 가능하다.
 - Browser gate는 `variationalOrder`가 있으면 symbol 페이지 이동 → Market 탭 → Buy/Sell 선택 → Size 입력 → 스크린샷 승인 순서로 처리한다.
+- `variationalOrder.reduceOnly=true`이면 Reduce Only 체크박스를 켠 뒤 Size를 입력한다.
 - 새 요청의 기본 `confirmSelector`는 `auto`다. Browser gate는 주문 패널 영역의 활성 버튼 후보를 텔레그램 메시지에 표시하고, broad selector(`body`, `html`, `*`)는 live click에서 차단한다.
 
 ### Phase V4: 브라우저 클릭 게이트

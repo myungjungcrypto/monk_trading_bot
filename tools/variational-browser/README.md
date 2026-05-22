@@ -150,7 +150,9 @@ Future signal bots can create request files:
     "quantity": "0.000645",
     "sizeUsd": 50,
     "fairPrice": 77533.4,
-    "pairDirection": "LONG_BTC_SHORT_ETH"
+    "pairDirection": "LONG_BTC_SHORT_ETH",
+    "action": "open",
+    "reduceOnly": false
   },
   "steps": [
     { "type": "wait", "ms": 1000 }
@@ -175,6 +177,11 @@ click points through `VARIATIONAL_BROWSER_BUY_FALLBACK_POINT` and
 DOM input, it can fall back to `VARIATIONAL_BROWSER_SIZE_FALLBACK_POINT` and
 type the generated quantity there. Keep this in dry-run until the Telegram
 screenshot confirms the correct side and size are selected.
+
+For close requests, `variationalOrder.reduceOnly=true` causes the gate to enable
+the Reduce Only checkbox before filling size. If the selector is not found, it
+falls back to `VARIATIONAL_BROWSER_REDUCE_ONLY_FALLBACK_POINT`; verify the
+checkbox in the dry-run screenshot before any live close click.
 
 With `confirmSelector: "auto"`, the approval caption lists enabled final-button
 candidates from the order panel area. Live mode refuses broad selectors such as
@@ -209,6 +216,16 @@ python -m backend.scripts.create_variational_browser_request \
   --direction LONG_BTC_SHORT_ETH \
   --size-usd 50 \
   --legs BTC
+```
+
+Create a reduce-only close request by inverting the original pair direction:
+
+```bash
+python -m backend.scripts.create_variational_browser_request \
+  --direction SHORT_BTC_LONG_ETH \
+  --action close \
+  --legs ETH \
+  --eth-quantity 0.0235
 ```
 
 Watch a directory:

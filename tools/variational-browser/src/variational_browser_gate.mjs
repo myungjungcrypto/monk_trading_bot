@@ -561,6 +561,7 @@ class VariationalBrowserGate {
     const side = String(order.side || "").toUpperCase();
     const quantity = String(order.quantity ?? "").trim();
     const orderType = String(order.orderType || "market").toLowerCase();
+    const reduceOnly = Boolean(order.reduceOnly);
 
     if (!["BTC", "ETH"].includes(symbol)) {
       throw new Error(`unsupported Variational order symbol: ${order.symbol}`);
@@ -571,7 +572,7 @@ class VariationalBrowserGate {
     if (!quantity || Number(quantity) <= 0) {
       throw new Error(`invalid Variational order quantity: ${order.quantity}`);
     }
-    console.log(`[Variational Browser] order target: ${symbol} ${side} ${quantity}`);
+    console.log(`[Variational Browser] order target: ${symbol} ${side} ${quantity} reduce_only=${reduceOnly}`);
 
     const targetPath = `/perpetual/${symbol}`;
     if (!this.page.url().includes(targetPath)) {
@@ -589,12 +590,19 @@ class VariationalBrowserGate {
     const clickedSide = await this.clickOrderSide(side);
     await this.page.waitForTimeout(300);
 
+    let reduceOnlySelector = "";
+    if (reduceOnly) {
+      console.log("[Variational Browser] enabling reduce only...");
+      reduceOnlySelector = await this.enableReduceOnly();
+      await this.page.waitForTimeout(300);
+    }
+
     console.log("[Variational Browser] filling size input...");
     const filledSelector = await this.fillOrderSize(quantity);
     await this.page.waitForTimeout(this.config.orderSetupDelayMs);
-    console.log(`[Variational Browser] order panel set: side_selector=${clickedSide} size_selector=${filledSelector}`);
+    console.log(`[Variational Browser] order panel set: side_selector=${clickedSide} reduce_only_selector=${reduceOnlySelector || "none"} size_selector=${filledSelector}`);
 
-    return { symbol, side, quantity, clickedSide, filledSelector };
+    return { symbol, side, quantity, clickedSide, reduceOnlySelector, filledSelector };
   }
 
   async clickOrderSide(side) {
@@ -611,6 +619,27 @@ class VariationalBrowserGate {
     const x = Math.round(viewport.width * point.x);
     const y = Math.round(viewport.height * point.y);
     console.log(`[Variational Browser] ${side} selector not found; clicking fallback point x=${x} y=${y}`);
+    await this.page.mouse.click(x, y);
+    return `fallback:${point.x},${point.y}`;
+  }
+
+  async enableReduceOnly() {
+    const selector = await this.checkFirstAvailableOptional(
+      this.config.reduceOnlySelectors,
+      "reduce only",
+      this.config.reduceOnlyTimeoutMs,
+    );
+    if (selector) return selector;
+
+    if (!this.config.reduceOnlyFallbackEnabled) {
+      throw new Error(`Could not enable reduce only. Tried: ${this.config.reduceOnlySelectors.join(", ")}`);
+    }
+
+    const viewport = this.page.viewportSize() || this.config.viewport;
+    const point = this.config.reduceOnlyFallbackPoint;
+    const x = Math.round(viewport.width * point.x);
+    const y = Math.round(viewport.height * point.y);
+    console.log(`[Variational Browser] reduce only selector not found; clicking fallback point x=${x} y=${y}`);
     await this.page.mouse.click(x, y);
     return `fallback:${point.x},${point.y}`;
   }
@@ -916,6 +945,31 @@ class VariationalBrowserGate {
     return "";
   }
 
+  async checkFirstAvailableOptional(selectors, label, timeoutMs = 3000) {
+    for (const selector of selectors) {
+      const locator = this.page.locator(selector).first();
+      try {
+        await locator.waitFor({ state: "visible", timeout: timeoutMs });
+        const tagName = await locator.evaluate((node) => node.tagName.toLowerCase()).catch(() => "");
+        const inputType = await locator.getAttribute("type").catch(() => "");
+        const role = await locator.getAttribute("role").catch(() => "");
+        if (tagName === "input" && inputType === "checkbox") {
+          await locator.setChecked(true, { force: true, timeout: timeoutMs });
+        } else if (role === "checkbox") {
+          const checked = await locator.getAttribute("aria-checked").catch(() => "");
+          if (checked !== "true") await locator.click();
+        } else {
+          await locator.click();
+        }
+        return selector;
+      } catch {
+        // Try next selector.
+      }
+    }
+    console.log(`[Variational Browser] ${label} checkbox selector not found. Tried: ${selectors.join(", ")}`);
+    return "";
+  }
+
   async extractWalletConnectUri() {
     if (this.config.walletConnectUriSelector) {
       const locator = this.page.locator(this.config.walletConnectUriSelector).first();
@@ -1086,6 +1140,12 @@ function loadConfig() {
       '[contenteditable="true"]',
       'input',
     ]),
+    reduceOnlySelectors: envList("VARIATIONAL_BROWSER_REDUCE_ONLY_SELECTORS", [
+      'label:has-text("Reduce Only")',
+      '[role="checkbox"]:has-text("Reduce Only")',
+      'text=/^Reduce Only$/i',
+      'input[type="checkbox"]',
+    ]),
     orderInputTimeoutMs: Number(env("VARIATIONAL_BROWSER_ORDER_INPUT_TIMEOUT_MS", "3000")),
     orderSetupDelayMs: Number(env("VARIATIONAL_BROWSER_ORDER_SETUP_DELAY_MS", "1200")),
     orderSideFallbackEnabled: envBool("VARIATIONAL_BROWSER_SIDE_FALLBACK_ENABLED", true),
@@ -1093,6 +1153,9 @@ function loadConfig() {
     orderSellFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_SELL_FALLBACK_POINT", "0.94,0.186")),
     orderSizeFallbackEnabled: envBool("VARIATIONAL_BROWSER_SIZE_FALLBACK_ENABLED", true),
     orderSizeFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_SIZE_FALLBACK_POINT", "0.93,0.292")),
+    reduceOnlyTimeoutMs: Number(env("VARIATIONAL_BROWSER_REDUCE_ONLY_TIMEOUT_MS", "2000")),
+    reduceOnlyFallbackEnabled: envBool("VARIATIONAL_BROWSER_REDUCE_ONLY_FALLBACK_ENABLED", true),
+    reduceOnlyFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_REDUCE_ONLY_FALLBACK_POINT", "0.768,0.364")),
     confirmCandidateMinXRatio: Number(env("VARIATIONAL_BROWSER_CONFIRM_CANDIDATE_MIN_X_RATIO", "0.70")),
     confirmCandidateMinYRatio: Number(env("VARIATIONAL_BROWSER_CONFIRM_CANDIDATE_MIN_Y_RATIO", "0.30")),
     confirmCandidateMaxYRatio: Number(env("VARIATIONAL_BROWSER_CONFIRM_CANDIDATE_MAX_Y_RATIO", "0.60")),

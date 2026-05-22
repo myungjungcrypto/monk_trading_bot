@@ -53,6 +53,7 @@ def parse_args() -> argparse.Namespace:
         required=True,
     )
     parser.add_argument("--size-usd", type=float, default=float(os.getenv("POSITION_SIZE_USD", "50")))
+    parser.add_argument("--action", choices=["open", "close"], default="open")
     parser.add_argument("--zscore", type=float, default=None)
     parser.add_argument("--divergence-pct", type=float, default=None)
     parser.add_argument("--base-url", default=os.getenv("VARIATIONAL_BROWSER_BASE_URL", os.getenv("VARIATIONAL_BROWSER_URL", "https://omni.variational.io")))
@@ -62,6 +63,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--request-dir", default=str(DEFAULT_REQUEST_DIR))
     parser.add_argument("--steps-json", default="")
     parser.add_argument("--max-age-sec", type=int, default=int(os.getenv("VARIATIONAL_REQUEST_MAX_AGE_SEC", "300")))
+    parser.add_argument("--quantity", default="")
+    parser.add_argument("--btc-quantity", default="")
+    parser.add_argument("--eth-quantity", default="")
+    parser.add_argument("--reduce-only", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--btc-qty-decimals", type=int, default=6)
     parser.add_argument("--eth-qty-decimals", type=int, default=4)
     return parser.parse_args()
@@ -75,7 +80,10 @@ def build_requests(args: argparse.Namespace, fair_prices: dict) -> list[dict]:
 
     btc = fair_prices["BTC"]
     eth = fair_prices["ETH"]
-    legs = selected_legs(args.direction, args.legs)
+    if args.quantity and args.legs == "both":
+        raise SystemExit("--quantity requires --legs BTC or --legs ETH. Use --btc-quantity/--eth-quantity for both legs.")
+
+    legs = selected_legs(args.direction, args.legs, args.action)
     base_url = normalize_base_url(args.base_url)
     request_group = f"variational-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}-{uuid4().hex[:8]}"
     requests = []
@@ -83,12 +91,15 @@ def build_requests(args: argparse.Namespace, fair_prices: dict) -> list[dict]:
     for symbol, side in legs:
         fair = fair_prices[symbol]
         decimals = args.btc_qty_decimals if symbol == "BTC" else args.eth_qty_decimals
-        quantity = format_quantity(args.size_usd / fair.price, decimals)
+        quantity = requested_quantity(args, symbol) or format_quantity(args.size_usd / fair.price, decimals)
+        reduce_only = args.reduce_only if args.reduce_only is not None else args.action == "close"
         summary = "\n".join([
             f"Variational browser request: {args.direction}",
+            f"action: {args.action}",
             f"leg: {symbol} {side}",
             f"quantity: {quantity} {symbol}",
             f"size_usd: {args.size_usd:.2f}",
+            f"reduce_only: {reduce_only}",
             f"fair_{symbol.lower()}: {fair.price:.6f} ({','.join(fair.source_names)})",
             f"fair_btc: {btc.price:.2f} ({','.join(btc.source_names)})",
             f"fair_eth: {eth.price:.4f} ({','.join(eth.source_names)})",
@@ -112,10 +123,13 @@ def build_requests(args: argparse.Namespace, fair_prices: dict) -> list[dict]:
                 "sizeUsd": args.size_usd,
                 "fairPrice": fair.price,
                 "pairDirection": args.direction,
+                "action": args.action,
+                "reduceOnly": reduce_only,
             },
             "signal": {
                 "direction": args.direction,
-                "leg": {"symbol": symbol, "side": side, "quantity": quantity},
+                "action": args.action,
+                "leg": {"symbol": symbol, "side": side, "quantity": quantity, "reduce_only": reduce_only},
                 "size_usd_per_leg": args.size_usd,
                 "zscore": args.zscore,
                 "divergence_pct": args.divergence_pct,
@@ -128,14 +142,27 @@ def build_requests(args: argparse.Namespace, fair_prices: dict) -> list[dict]:
     return requests
 
 
-def selected_legs(direction: str, legs_arg: str) -> list[tuple[str, str]]:
+def selected_legs(direction: str, legs_arg: str, action: str = "open") -> list[tuple[str, str]]:
     mapping = {
         "LONG_BTC_SHORT_ETH": [("BTC", "BUY"), ("ETH", "SELL")],
         "SHORT_BTC_LONG_ETH": [("BTC", "SELL"), ("ETH", "BUY")],
     }[direction]
+    if action == "close":
+        inverse = {"BUY": "SELL", "SELL": "BUY"}
+        mapping = [(symbol, inverse[side]) for symbol, side in mapping]
     if legs_arg == "both":
         return mapping
     return [leg for leg in mapping if leg[0] == legs_arg]
+
+
+def requested_quantity(args: argparse.Namespace, symbol: str) -> str:
+    raw = args.quantity or (args.btc_quantity if symbol == "BTC" else args.eth_quantity)
+    if not raw:
+        return ""
+    value = str(raw).strip()
+    if not value or float(value) <= 0:
+        raise SystemExit(f"Invalid {symbol} quantity: {raw}")
+    return value
 
 
 def env_bool(name: str, fallback: bool = False) -> bool:
