@@ -226,9 +226,13 @@ page and continue as if size was filled. Keep this in dry-run until the Telegram
 screenshot confirms the correct side and size are selected.
 
 For close requests, `variationalOrder.reduceOnly=true` causes the gate to enable
-the Reduce Only checkbox before filling size. If the selector is not found, it
-falls back to `VARIATIONAL_BROWSER_REDUCE_ONLY_FALLBACK_POINT`; verify the
-checkbox in the dry-run screenshot before any live close click.
+the Reduce Only checkbox before filling size. Live reduce-only clicks require
+`VARIATIONAL_BROWSER_REQUIRE_REDUCE_ONLY_CHECKED=true` by default, so the gate
+verifies the checkbox is actually checked after setup and again immediately
+before the final order click. If the checkbox state cannot be verified, is
+disabled, or is unchecked, the click is refused. The Reduce Only fallback is
+disabled by default because a stale viewport point can hit another checkbox on
+Variational's order panel.
 
 In live mode, close requests are auto-clicked without waiting for Telegram when
 all of the following are true:
@@ -236,6 +240,7 @@ all of the following are true:
 - `VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY=true`
 - `variationalOrder.action` is `close`
 - `variationalOrder.reduceOnly` is `true`
+- the Reduce Only checkbox is verified checked on the page
 
 The browser still sends pre-click and post-click screenshots for audit. If
 `VARIATIONAL_BROWSER_DRY_RUN=true`, the auto reduce-only path reports dry-run

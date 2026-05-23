@@ -145,6 +145,9 @@ class BotEngine:
         self._config_reload_interval = float(os.getenv("BOT_CONFIG_RELOAD_INTERVAL_SEC", "15"))
         self._config_fingerprint = self._runtime_config_fingerprint(self.config)
         self._ignored_reload_warning: Optional[str] = None
+        self._closing_trade_ids: set[str] = set()
+        self._exit_retry_after: Dict[str, float] = {}
+        self._exit_retry_cooldown_sec = float(os.getenv("VARIATIONAL_BROWSER_CLOSE_RETRY_COOLDOWN_SEC", "120"))
 
         # 첫 번째 활성 거래소 (주문 실행용)
         self._primary_exchange: Optional[BaseExchange] = None
@@ -821,31 +824,80 @@ class BotEngine:
 
     async def _handle_exit(self, trade_id: str, reason: ExitReason, message: str) -> None:
         """포지션을 청산합니다."""
+        if trade_id in self._closing_trade_ids:
+            logger.info("Exit already in progress for %s; skipping duplicate close request", trade_id)
+            return
+
+        retry_after = self._exit_retry_after.get(trade_id, 0.0)
+        now = time.time()
+        if retry_after > now:
+            logger.warning(
+                "Exit retry suppressed for %s for %.1fs after a failed Variational close",
+                trade_id,
+                retry_after - now,
+            )
+            return
+
+        self._closing_trade_ids.add(trade_id)
         logger.info("EXIT: %s | reason=%s | %s", trade_id, reason.value, message)
 
-        if self._uses_virtual_positions:
-            if self.variational_bridge:
-                open_trade = self.position_manager.open_trades.get(trade_id)
-                if open_trade is None:
-                    logger.warning("Virtual trade not found for Variational close request: %s", trade_id)
-                    return
-                try:
-                    close_batch = await self.variational_bridge.create_close_requests(
-                        trade=open_trade,
-                        reason=reason.value,
-                    )
-                    await self._notify_variational_requests("close", close_batch)
-                    if not await self._await_variational_browser_execution("close", close_batch):
+        try:
+            if self._uses_virtual_positions:
+                if self.variational_bridge:
+                    open_trade = self.position_manager.open_trades.get(trade_id)
+                    if open_trade is None:
+                        logger.warning("Virtual trade not found for Variational close request: %s", trade_id)
                         return
-                except Exception as e:
-                    logger.error("Failed to create Variational close requests: %s", e, exc_info=True)
-                    if self.telegram:
-                        await self.telegram.error("Variational close request failed", str(e))
-                    return
+                    try:
+                        close_batch = await self.variational_bridge.create_close_requests(
+                            trade=open_trade,
+                            reason=reason.value,
+                        )
+                        await self._notify_variational_requests("close", close_batch)
+                        if not await self._await_variational_browser_execution("close", close_batch):
+                            self._exit_retry_after[trade_id] = time.time() + self._exit_retry_cooldown_sec
+                            return
+                    except Exception as e:
+                        self._exit_retry_after[trade_id] = time.time() + self._exit_retry_cooldown_sec
+                        logger.error("Failed to create Variational close requests: %s", e, exc_info=True)
+                        if self.telegram:
+                            await self.telegram.error("Variational close request failed", str(e))
+                        return
 
-            trade = self.position_manager.close_virtual_pair(trade_id, reason.value)
+                trade = self.position_manager.close_virtual_pair(trade_id, reason.value)
+                if trade:
+                    self._exit_retry_after.pop(trade_id, None)
+                    self.risk_manager.on_trade_closed(trade_id, trade.net_pnl_usd)
+                    db_id = self._trade_db_ids.pop(trade_id, None)
+                    if db_id and self.trade_recorder:
+                        await self.trade_recorder.record_close(
+                            db_id,
+                            trade,
+                            reason.value,
+                            open_positions=len(self.position_manager.open_trades),
+                        )
+                    elif self.trade_recorder:
+                        await self.trade_recorder.record_full(
+                            trade,
+                            exit_reason=reason.value,
+                            signal_mode=self.config.trading_mode,
+                        )
+                    if self.telegram:
+                        await self.telegram.trade_closed(trade, reason.value, message)
+                return
+
+            if self._primary_exchange is None:
+                return
+
+            trade = await self.position_manager.close_pair(trade_id, self._primary_exchange, reason.value)
             if trade:
+                self._exit_retry_after.pop(trade_id, None)
                 self.risk_manager.on_trade_closed(trade_id, trade.net_pnl_usd)
+                logger.info(
+                    "Trade closed: %s | PNL=$%.2f (%.2f%%) | reason=%s",
+                    trade_id, trade.net_pnl_usd, trade.pnl_pct, reason.value,
+                )
+                # DB에 청산 기록
                 db_id = self._trade_db_ids.pop(trade_id, None)
                 if db_id and self.trade_recorder:
                     await self.trade_recorder.record_close(
@@ -854,43 +906,16 @@ class BotEngine:
                         reason.value,
                         open_positions=len(self.position_manager.open_trades),
                     )
-                elif self.trade_recorder:
-                    await self.trade_recorder.record_full(
-                        trade,
-                        exit_reason=reason.value,
-                        signal_mode=self.config.trading_mode,
-                    )
                 if self.telegram:
-                    await self.telegram.trade_closed(trade, reason.value, message)
-            return
-
-        if self._primary_exchange is None:
-            return
-
-        trade = await self.position_manager.close_pair(trade_id, self._primary_exchange, reason.value)
-        if trade:
-            self.risk_manager.on_trade_closed(trade_id, trade.net_pnl_usd)
-            logger.info(
-                "Trade closed: %s | PNL=$%.2f (%.2f%%) | reason=%s",
-                trade_id, trade.net_pnl_usd, trade.pnl_pct, reason.value,
-            )
-            # DB에 청산 기록
-            db_id = self._trade_db_ids.pop(trade_id, None)
-            if db_id and self.trade_recorder:
-                await self.trade_recorder.record_close(
-                    db_id,
-                    trade,
-                    reason.value,
-                    open_positions=len(self.position_manager.open_trades),
-                )
-            if self.telegram:
-                await self.telegram.notify_exit(
-                    trade_id=trade_id,
-                    reason=reason.value,
-                    pnl_usd=trade.net_pnl_usd,
-                    pnl_pct=trade.pnl_pct,
-                    direction=trade.direction.value if hasattr(trade, 'direction') else "",
-                )
+                    await self.telegram.notify_exit(
+                        trade_id=trade_id,
+                        reason=reason.value,
+                        pnl_usd=trade.net_pnl_usd,
+                        pnl_pct=trade.pnl_pct,
+                        direction=trade.direction.value if hasattr(trade, 'direction') else "",
+                    )
+        finally:
+            self._closing_trade_ids.discard(trade_id)
 
     async def _notify_variational_requests(
         self,

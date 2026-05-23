@@ -866,6 +866,9 @@ class VariationalBrowserGate {
       undefined,
       "prepared click screenshot",
     );
+    if (request.variationalOrder?.reduceOnly === true) {
+      await this.assertReduceOnlyChecked("before confirm click");
+    }
     await this.clickConfirm(request, prepared.confirmCandidates);
     await this.page.waitForTimeout(Number(request.afterClickDelayMs ?? this.config.afterClickDelayMs));
     const afterPath = await this.captureScreenshot(`${screenshotPrefix}-after`);
@@ -1031,11 +1034,15 @@ class VariationalBrowserGate {
       console.log("[Variational Browser] enabling reduce only...");
       reduceOnlySelector = await this.enableReduceOnly();
       await this.page.waitForTimeout(300);
+      await this.assertReduceOnlyChecked("after enable");
     }
 
     console.log("[Variational Browser] filling size input...");
     const filledSelector = await this.fillOrderSize(quantity);
     await this.page.waitForTimeout(this.config.orderSetupDelayMs);
+    if (reduceOnly) {
+      await this.assertReduceOnlyChecked("after size input");
+    }
     console.log(`[Variational Browser] order panel set: side_selector=${clickedSide} reduce_only_selector=${reduceOnlySelector || "none"} size_selector=${filledSelector}`);
 
     return { symbol, side, quantity, clickedSide, reduceOnlySelector, filledSelector };
@@ -1078,6 +1085,127 @@ class VariationalBrowserGate {
     console.log(`[Variational Browser] reduce only selector not found; clicking fallback point x=${x} y=${y}`);
     await this.page.mouse.click(x, y);
     return `fallback:${point.x},${point.y}`;
+  }
+
+  async assertReduceOnlyChecked(context = "") {
+    if (!this.config.requireReduceOnlyChecked) return;
+
+    const state = await this.readReduceOnlyControlState();
+    const suffix = context ? ` (${context})` : "";
+    if (!state.found) {
+      throw new Error(`Reduce Only checkbox state could not be verified${suffix}; refusing live reduce-only click`);
+    }
+    if (state.disabled) {
+      throw new Error(`Reduce Only checkbox is disabled${suffix}; refusing live reduce-only click`);
+    }
+    if (state.checked !== true) {
+      throw new Error(
+        `Reduce Only checkbox is not checked${suffix}; refusing live reduce-only click ` +
+        `(source=${state.source || "unknown"}, checked=${state.checked})`,
+      );
+    }
+  }
+
+  async readReduceOnlyControlState() {
+    return this.page.evaluate(() => {
+      const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+      const visible = (node) => {
+        if (!node || !(node instanceof Element)) return false;
+        const rect = node.getBoundingClientRect();
+        const style = window.getComputedStyle(node);
+        return rect.width > 0
+          && rect.height > 0
+          && style.visibility !== "hidden"
+          && style.display !== "none"
+          && Number(style.opacity || "1") > 0.01;
+      };
+      const rectInfo = (node) => {
+        const rect = node.getBoundingClientRect();
+        return {
+          left: rect.left,
+          right: rect.right,
+          top: rect.top,
+          bottom: rect.bottom,
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+          width: rect.width,
+          height: rect.height,
+        };
+      };
+      const ownText = (node) => normalize(
+        Array.from(node.childNodes || [])
+          .filter((child) => child.nodeType === Node.TEXT_NODE)
+          .map((child) => child.textContent || "")
+          .join(" "),
+      );
+      const checkedValue = (node) => {
+        const tag = String(node.tagName || "").toLowerCase();
+        const type = String(node.getAttribute("type") || "").toLowerCase();
+        if (tag === "input" && type === "checkbox") return Boolean(node.checked);
+        const aria = node.getAttribute("aria-checked");
+        if (aria === "true") return true;
+        if (aria === "false") return false;
+        const state = String(node.getAttribute("data-state") || "").toLowerCase();
+        if (["checked", "on", "true"].includes(state)) return true;
+        if (["unchecked", "off", "false"].includes(state)) return false;
+        const className = String(node.className || "").toLowerCase();
+        if (/\bchecked\b/.test(className)) return true;
+        return null;
+      };
+      const disabledValue = (node) => Boolean(
+        node.disabled
+        || node.getAttribute("aria-disabled") === "true"
+        || node.getAttribute("data-disabled") === "true"
+        || node.closest?.('[aria-disabled="true"],[data-disabled="true"],[disabled]'),
+      );
+      const describe = (node, source) => ({
+        found: true,
+        checked: checkedValue(node),
+        disabled: disabledValue(node),
+        source,
+      });
+
+      const all = Array.from(document.querySelectorAll("body *"));
+      const labels = all
+        .filter(visible)
+        .filter((node) => {
+          const text = ownText(node) || normalize(node.getAttribute("aria-label") || node.textContent);
+          return /^Reduce Only$/i.test(text) && node.getBoundingClientRect().width < 260;
+        });
+
+      for (const label of labels) {
+        if (label instanceof HTMLLabelElement && label.control) {
+          return describe(label.control, "label.control");
+        }
+        const embedded = label.querySelector?.('input[type="checkbox"],[role="checkbox"],[aria-checked],[data-state]');
+        if (embedded) return describe(embedded, "label.embedded");
+      }
+
+      const controls = all
+        .filter((node) => (
+          node.matches?.('input[type="checkbox"],[role="checkbox"],[aria-checked],[data-state]')
+        ))
+        .filter((node) => visible(node) || (node.tagName || "").toLowerCase() === "input")
+        .map((node) => ({ node, rect: rectInfo(node) }))
+        .filter((item) => item.rect.width <= 80 && item.rect.height <= 80);
+
+      let best = null;
+      for (const label of labels) {
+        const labelRect = rectInfo(label);
+        for (const control of controls) {
+          const dy = Math.abs(control.rect.y - labelRect.y);
+          const dx = labelRect.left - control.rect.right;
+          if (dy > 28 || dx < -16 || dx > 120) continue;
+          const score = dy + Math.max(dx, 0) / 8;
+          if (!best || score < best.score) {
+            best = { ...control, score };
+          }
+        }
+      }
+      if (best) return describe(best.node, "geometry");
+
+      return { found: false, checked: null, disabled: false, source: "" };
+    });
   }
 
   async fillOrderSize(quantity) {
@@ -1764,8 +1892,9 @@ function loadConfig() {
     orderSizeFallbackEnabled: envBool("VARIATIONAL_BROWSER_SIZE_FALLBACK_ENABLED", true),
     orderSizeFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_SIZE_FALLBACK_POINT", "0.948,0.266")),
     reduceOnlyTimeoutMs: Number(env("VARIATIONAL_BROWSER_REDUCE_ONLY_TIMEOUT_MS", "2000")),
-    reduceOnlyFallbackEnabled: envBool("VARIATIONAL_BROWSER_REDUCE_ONLY_FALLBACK_ENABLED", true),
-    reduceOnlyFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_REDUCE_ONLY_FALLBACK_POINT", "0.768,0.364")),
+    reduceOnlyFallbackEnabled: envBool("VARIATIONAL_BROWSER_REDUCE_ONLY_FALLBACK_ENABLED", false),
+    reduceOnlyFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_REDUCE_ONLY_FALLBACK_POINT", "0.768,0.340")),
+    requireReduceOnlyChecked: envBool("VARIATIONAL_BROWSER_REQUIRE_REDUCE_ONLY_CHECKED", true),
     confirmCandidateMinXRatio: Number(env("VARIATIONAL_BROWSER_CONFIRM_CANDIDATE_MIN_X_RATIO", "0.70")),
     confirmCandidateMinYRatio: Number(env("VARIATIONAL_BROWSER_CONFIRM_CANDIDATE_MIN_Y_RATIO", "0.30")),
     confirmCandidateMaxYRatio: Number(env("VARIATIONAL_BROWSER_CONFIRM_CANDIDATE_MAX_Y_RATIO", "0.60")),

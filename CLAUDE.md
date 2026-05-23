@@ -719,12 +719,13 @@ python -m backend.scripts.create_variational_browser_request \
 - 3개 중 1개 소스가 응답하지 않아도 2개 이상이면 진행 가능하다.
 - Browser gate는 `variationalOrder`가 있으면 symbol 페이지 이동 → Market 탭 → Buy/Sell 선택 → Size 입력 → 스크린샷 승인 순서로 처리한다.
 - Size fallback은 클릭 후 실제 editable input이 포커스된 경우에만 `Ctrl+A`와 quantity 입력을 수행한다. 포커스가 body 등에 남아 있으면 페이지 전체 선택을 방지하고 request를 실패 처리한다.
-- `variationalOrder.reduceOnly=true`이면 Reduce Only 체크박스를 켠 뒤 Size를 입력한다.
+- `variationalOrder.reduceOnly=true`이면 Reduce Only 체크박스를 켠 뒤 Size를 입력한다. live reduce-only 클릭은 `VARIATIONAL_BROWSER_REQUIRE_REDUCE_ONLY_CHECKED=true` 기본값에서 체크박스가 실제 checked 상태로 검증될 때만 허용한다. 검증 불가/disabled/unchecked이면 최종 주문 버튼을 누르지 않는다.
 - 새 요청의 기본 `confirmSelector`는 `auto`다. Browser gate는 주문 패널 영역의 활성 버튼 후보를 텔레그램 메시지에 표시하고, broad selector(`body`, `html`, `*`)는 live click에서 차단한다.
 - `variationalOrder` live click은 `Buy BTC`, `Sell ETH`처럼 side+symbol이 보이는 confirm button만 허용한다. 텍스트가 빈 버튼 후보는 클릭하지 않고 request를 실패 처리한다.
 - `VARIATIONAL_BROWSER_AUTO_CLICK_OPEN=true`이면 backend-created BTC/ETH batch 진입도 텔레그램 승인 없이 자동 클릭한다. 이 경로는 `VARIATIONAL_BROWSER_AUTO_CLICK_OPEN_MAX_SIZE_USD` 이하의 양다리 open batch에만 적용된다. 기본값은 false다.
 - `VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY=true`이면 `action=close` + `reduceOnly=true` 요청은 텔레그램 승인 없이 자동 클릭한다.
 - `VARIATIONAL_BROWSER_BATCH_REQUESTS=true`이면 BotEngine이 만드는 BTC/ETH 두 다리는 하나의 batch request 파일로 저장된다. 오픈은 한 번 승인으로 두 다리를 순차 클릭하고, 청산은 한 번의 자동 reduce-only batch로 두 다리를 순차 클릭한다. reduce-only 청산 batch에서 한 다리가 실패하면 실패 다리를 `VARIATIONAL_BROWSER_REDUCE_ONLY_BATCH_RETRY_ATTEMPTS` 횟수만큼 재시도한다.
+- reduce-only fallback 좌표는 다른 체크박스(TP/SL 등)를 누를 수 있으므로 기본 비활성화했다. selector로 체크 상태를 확인하지 못하면 청산 클릭은 실패 처리된다.
 
 자동 봇 연동:
 - `EXECUTION_MODE=variational_browser`이면 BotEngine은 실제 거래소 API 주문을 넣지 않고, `variational_browser` 가상 포지션으로 PnL/DB를 추적한다.
@@ -834,6 +835,9 @@ VARIATIONAL_BROWSER_AUTO_CLICK_OPEN=false
 VARIATIONAL_BROWSER_AUTO_CLICK_OPEN_MAX_SIZE_USD=100
 VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY=true
 VARIATIONAL_BROWSER_BATCH_REQUESTS=true
+VARIATIONAL_BROWSER_REQUIRE_REDUCE_ONLY_CHECKED=true
+VARIATIONAL_BROWSER_REDUCE_ONLY_FALLBACK_ENABLED=false
+VARIATIONAL_BROWSER_CLOSE_RETRY_COOLDOWN_SEC=120
 BOT_CONFIG_RELOAD_INTERVAL_SEC=15
 ```
 
@@ -846,6 +850,8 @@ VARIATIONAL_BROWSER_AUTO_CLICK_OPEN_MAX_SIZE_USD=600
 VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY=true
 VARIATIONAL_BROWSER_BATCH_REQUESTS=true
 VARIATIONAL_BROWSER_CONFIRM_SELECTOR=auto
+VARIATIONAL_BROWSER_REQUIRE_REDUCE_ONLY_CHECKED=true
+VARIATIONAL_BROWSER_REDUCE_ONLY_FALLBACK_ENABLED=false
 VARIATIONAL_BROWSER_TELEGRAM_BEST_EFFORT_TIMEOUT_SEC=3
 ```
 
