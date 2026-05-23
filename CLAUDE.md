@@ -782,7 +782,8 @@ npm start -- --connect-wallet
 - Browser gate는 BTC/ETH perpetual 페이지 이동, Market 탭 선택, Buy/Sell 선택, Size 입력, Reduce Only 체크, 주문 버튼 후보 탐지, Telegram screenshot approval을 수행한다.
 - `confirmSelector=auto`가 기본값이며, Telegram 메시지에 `confirm_button_candidates`를 표시한다. broad selector live click은 차단한다.
 - 진입 요청은 양다리로 생성된다. `LONG_BTC_SHORT_ETH`는 BTC Buy + ETH Sell, `SHORT_BTC_LONG_ETH`는 BTC Sell + ETH Buy다.
-- 기본값에서는 양다리 진입 요청이 하나의 `variationalBatch` 파일에 묶인다. Browser gate는 각 다리 preview screenshot을 보낸 뒤 Telegram `Click Pair` 승인 한 번만 받고 BTC/ETH를 순차 클릭한다. 첫 다리 클릭 후 다음 다리가 실패하면 이미 클릭한 진입 다리를 즉시 reduce-only rollback하려고 시도하고, batch를 `clicked`가 아닌 `rolledback`/`partial_failed`로 archive한다.
+- 기본값에서는 양다리 진입 요청이 하나의 `variationalBatch` 파일에 묶인다. 수동 승인 모드에서는 Browser gate가 각 다리 preview screenshot을 보낸 뒤 Telegram `Click Pair` 승인 한 번만 받고 BTC/ETH를 순차 클릭한다. 첫 다리 클릭 후 다음 다리가 실패하면 이미 클릭한 진입 다리를 즉시 reduce-only rollback하려고 시도하고, batch를 `clicked`가 아닌 `rolledback`/`partial_failed`로 archive한다.
+- 완전 자동 진입 모드(`VARIATIONAL_BROWSER_AUTO_CLICK_OPEN=true`)에서는 별도 approval preview pass를 생략하고 `AUTO PAIR OPEN` 알림 뒤 바로 각 다리의 prepared-click flow로 들어간다. 예전에는 BTC/ETH preview 세팅 후 실제 클릭 때 BTC/ETH를 다시 세팅해 총 4번 패널을 만지면서 몇 분 지연될 수 있었으나, 지금은 중복 세팅과 Telegram preview upload 대기를 줄였다.
 - 청산 요청은 원래 방향을 반전하고 `reduceOnly=true`를 사용한다. BotEngine 연동 청산은 가상 포지션에 저장된 실제 BTC/ETH 수량을 사용한다.
 - 청산 요청도 하나의 `variationalBatch` 파일에 묶이며, `VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY=true` 기본값에서 자동 클릭된다. 이 경로는 모든 다리가 `action=close`와 `reduceOnly=true`를 만족할 때만 작동하며, pre/post screenshot은 텔레그램으로 남긴다. 한 청산 다리가 실패해도 다른 다리 처리를 멈추지 않고 실패 다리를 재시도한 뒤 partial failure 여부를 보고한다. `VARIATIONAL_BROWSER_DRY_RUN=true`이면 자동 경로에서도 클릭하지 않는다.
 - `VARIATIONAL_BROWSER_AUTO_CLICK_OPEN=true` 또는 자동 reduce-only 청산 경로에서는 Telegram preview/status screenshot 전송이 best-effort다. Telegram API가 느리거나 일시적으로 `ETIMEDOUT`을 내더라도 `VARIATIONAL_BROWSER_TELEGRAM_BEST_EFFORT_TIMEOUT_SEC`까지만 기다린 뒤 request watcher와 자동 클릭 흐름은 계속 진행하고, 로그에 `[telegram] ... failed` 경고만 남긴다. 단, 수동 승인 모드는 승인 버튼을 받아야 하므로 Telegram 연결이 필요하다.
@@ -795,6 +796,7 @@ npm start -- --connect-wallet
 - Lighter REST kline 403 문제 때문에 startup warmup은 Binance Futures klines를 우선 사용한다.
 - 실행 중 Settings 변경은 `BOT_CONFIG_RELOAD_INTERVAL_SEC` 간격으로 자동 반영된다. 텔레그램에는 `[Monk] CONFIG RELOADED`가 오며, 청산 조건은 열린 포지션에, 진입 조건과 size/leverage/cost는 다음 진입부터 적용된다.
 - 단일 다리 dry-run, BTC/ETH 다리 dry-run, Telegram 승인 후 live click, reduce-only close click이 소액 테스트에서 동작 확인되었다.
+- 2026-05-23 live 테스트에서 실제 Variational 주문은 체결됐지만 backend가 request를 `aborted`로 판단해 DB/프론트 포지션을 열지 않는 race가 확인되었다. 원인은 backend completion timeout 시점에 원본 `.json`을 `.aborted.done`으로 rename했지만, browser daemon이 이미 파일을 읽고 UI 클릭을 진행 중이면 실제 주문은 계속 들어갈 수 있었기 때문이다. 이후 browser가 처리 시작 즉시 `.json.processing`으로 claim하고 backend는 processing request를 abort하지 않도록 수정했다.
 
 현재 운영 흐름:
 
@@ -827,6 +829,7 @@ VARIATIONAL_BROWSER_COMPLETION_TIMEOUT_SEC=360
 VARIATIONAL_BROWSER_PROCESSING_TIMEOUT_SEC=900
 VARIATIONAL_BROWSER_COMPLETION_POLL_SEC=1
 VARIATIONAL_BROWSER_RECONCILE_WINDOW_SEC=600
+VARIATIONAL_BROWSER_TELEGRAM_BEST_EFFORT_TIMEOUT_SEC=3
 VARIATIONAL_BROWSER_AUTO_CLICK_OPEN=false
 VARIATIONAL_BROWSER_AUTO_CLICK_OPEN_MAX_SIZE_USD=100
 VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY=true
@@ -834,10 +837,42 @@ VARIATIONAL_BROWSER_BATCH_REQUESTS=true
 BOT_CONFIG_RELOAD_INTERVAL_SEC=15
 ```
 
+완전 자동 소액 live 테스트 설정 예:
+
+```env
+VARIATIONAL_BROWSER_DRY_RUN=false
+VARIATIONAL_BROWSER_AUTO_CLICK_OPEN=true
+VARIATIONAL_BROWSER_AUTO_CLICK_OPEN_MAX_SIZE_USD=600
+VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY=true
+VARIATIONAL_BROWSER_BATCH_REQUESTS=true
+VARIATIONAL_BROWSER_CONFIRM_SELECTOR=auto
+VARIATIONAL_BROWSER_TELEGRAM_BEST_EFFORT_TIMEOUT_SEC=3
+```
+
+자동 진입 정상 로그 흐름:
+
+```text
+[Monk] ENTRY SIGNAL
+[Monk] STATUS
+Variational Browser entry requests queued
+[Variational Browser] processing batch request: ... legs=2
+[Variational Browser] AUTO PAIR OPEN
+[Variational Browser] prepared click ... leg: BTC
+[Variational Browser] clicked ... leg: BTC
+[Variational Browser] prepared click ... leg: ETH
+[Variational Browser] clicked ... leg: ETH
+[Monk] STATUS
+Variational Browser entry clicks confirmed
+[Monk] OPENED
+```
+
+주의: 자동 모드에서는 예전처럼 `PAIR LEG PREVIEW` 두 장이 먼저 오래 뜨는 흐름이 없어야 한다. 그 로그가 계속 보이면 EC2가 최신 코드를 pull/restart하지 않았거나, 수동 승인 모드로 실행 중인 것이다.
+
 남은 주의점:
 
 - Telegram 승인 timeout, 거절, browser daemon 중단은 자동 방어한다. 다만 사용자가 Variational 웹에서 직접 주문/청산하거나, UI 변경으로 잘못된 버튼 후보가 탐지되면 대시보드 가상 포지션과 실제 Variational 포지션이 어긋날 수 있다.
 - Browser daemon은 request 처리 시작 시 파일을 `.json.processing`으로 claim한다. Backend는 `.processing` 상태의 요청을 abort로 rename하지 않고 `VARIATIONAL_BROWSER_PROCESSING_TIMEOUT_SEC` 동안 최종 `.clicked.done`/실패 marker를 기다린다. 이는 browser가 이미 클릭 중인데 backend가 먼저 포기해서 실제 포지션만 생기는 race를 줄이기 위한 장치다.
+- 대시보드/DB에는 포지션이 없는데 Variational에는 실제 포지션이 있는 상태가 보이면, 새 진입이 중복으로 나갈 수 있으므로 먼저 `pm2 stop monk-api`로 backend를 멈추고 실제 Variational 포지션을 수동 정리한 뒤 재시작한다.
 - 따라서 live 테스트는 계속 소액으로 진행하고, Telegram screenshot의 `symbol`, `side`, `quantity`, `reduceOnly`, `confirm_button_candidates`를 확인해야 한다.
 - `tools/variational-wallet`과 `tools/variational-browser`가 같은 Telegram bot token으로 동시에 polling하면 callback을 서로 가져갈 수 있다. 가능하면 브라우저 승인용 bot token을 분리한다.
 - Variational 공식 trading API가 생기면 browser click gate는 제거하고 API execution adapter로 교체하는 것이 최종 목표다.
@@ -850,9 +885,11 @@ The trading signal engine still runs server-side. It receives live BTC/ETH price
 
 When the bot wants to trade on Variational, it does not send an order to an exchange API. Instead, it writes a local request file describing the intended leg: symbol, side, quantity, reduce-only flag, fair price snapshot, and expiration time. A separate Playwright browser process watches this request directory. That browser keeps a persistent Variational web session open on the EC2 instance.
 
-For each pair entry, the backend writes one batch request containing both BTC and ETH legs. The browser opens each Variational market page, selects Market order mode, chooses Buy or Sell, fills the size field, and sends preview screenshots for both legs. In the default safer mode, it asks for one Telegram approval for the full pair before clicking. In fully automated mode, `VARIATIONAL_BROWSER_AUTO_CLICK_OPEN=true` skips that approval and skips the separate preview pass for backend-created pair batches under `VARIATIONAL_BROWSER_AUTO_CLICK_OPEN_MAX_SIZE_USD`; it goes directly to the per-leg prepared-click flow. If the first leg clicks and a later leg fails, the browser attempts an immediate reduce-only rollback of the already-clicked entry leg and does not report the batch as successfully clicked.
+For each pair entry, the backend writes one batch request containing both BTC and ETH legs. The browser opens each Variational market page, selects Market order mode, chooses Buy or Sell, and fills the size field. In the default safer mode, it sends preview screenshots for both legs and asks for one Telegram approval for the full pair before clicking. In fully automated mode, `VARIATIONAL_BROWSER_AUTO_CLICK_OPEN=true` skips that approval and skips the separate preview pass for backend-created pair batches under `VARIATIONAL_BROWSER_AUTO_CLICK_OPEN_MAX_SIZE_USD`; it goes directly to the per-leg prepared-click flow. This matters because the preview pass used to set up BTC and ETH once, then the click pass set them up again, creating avoidable delay between signal, BTC fill, and ETH fill. If the first leg clicks and a later leg fails, the browser attempts an immediate reduce-only rollback of the already-clicked entry leg and does not report the batch as successfully clicked.
 
-Close requests are different. They are generated as a batch of reduce-only orders with the exact tracked quantities. Because they reduce exposure rather than create new exposure, the browser can auto-click the batch when `VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY=true`, every leg has `action=close`, and every leg has `reduceOnly=true`. The browser attempts to send pre-click and post-click screenshots to Telegram for audit, dry-run mode still skips the click, and failed reduce-only legs are retried before the daemon reports a partial close failure. In automatic open or reduce-only mode, Telegram audit messages are best-effort: a temporary Telegram timeout is logged but should not kill the request watcher or block the automatic click path. Manual approval mode still depends on Telegram being reachable.
+Close requests are different. They are generated as a batch of reduce-only orders with the exact tracked quantities. Because they reduce exposure rather than create new exposure, the browser can auto-click the batch when `VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY=true`, every leg has `action=close`, and every leg has `reduceOnly=true`. The browser attempts to send pre-click and post-click screenshots to Telegram for audit, dry-run mode still skips the click, and failed reduce-only legs are retried before the daemon reports a partial close failure. In automatic open or reduce-only mode, Telegram audit messages are best-effort and bounded by `VARIATIONAL_BROWSER_TELEGRAM_BEST_EFFORT_TIMEOUT_SEC`: a temporary Telegram timeout is logged but should not kill the request watcher or block the automatic click path for long. Manual approval mode still depends on Telegram being reachable.
+
+The request files are also claimed explicitly. When the browser daemon starts processing a request, it renames the file to `*.json.processing`. The backend treats that as "the browser is already acting on this request" and will not rename it to `*.aborted.done`; instead it waits up to `VARIATIONAL_BROWSER_PROCESSING_TIMEOUT_SEC` for a final `.clicked.done` or failure marker. This prevents the race where the browser is already clicking a live order but the backend gives up first and records no virtual/DB position.
 
 WalletConnect is used only to keep the Variational web session authenticated. In our testing, Variational did not require a new wallet signature for every order after the web session was authenticated. Because of that, the key approval point for each trade is the Telegram-controlled final browser click, not a per-order blockchain signature.
 
