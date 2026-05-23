@@ -198,7 +198,9 @@ attempts an immediate reduce-only rollback of the already-clicked entry leg and
 archives the batch as `rolledback` rather than `clicked`.
 If `VARIATIONAL_BROWSER_AUTO_CLICK_OPEN=true`, the approval wait is skipped for
 these backend-created pair batches when the request is under
-`VARIATIONAL_BROWSER_AUTO_CLICK_OPEN_MAX_SIZE_USD`.
+`VARIATIONAL_BROWSER_AUTO_CLICK_OPEN_MAX_SIZE_USD`. In this automated path,
+Telegram screenshots and status messages are best-effort audit logs; a temporary
+Telegram API timeout should not stop the daemon from processing the batch.
 
 For close batches, every leg must be `action=close` and `reduceOnly=true`.
 Those batches are auto-clicked when `VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY`
@@ -235,7 +237,8 @@ all of the following are true:
 
 The browser still sends pre-click and post-click screenshots for audit. If
 `VARIATIONAL_BROWSER_DRY_RUN=true`, the auto reduce-only path reports dry-run
-and skips the click.
+and skips the click. These audit sends are also best-effort in automatic close
+mode, while manual approval mode still requires Telegram to be reachable.
 
 With `confirmSelector: "auto"`, the approval caption lists enabled final-button
 candidates from the order panel area. Live mode refuses broad selectors such as
@@ -346,7 +349,9 @@ VARIATIONAL_BROWSER_BATCH_REQUESTS=true
 ```
 
 Auto-open only applies to backend-created BTC/ETH batch requests. The daemon
-still sends leg preview screenshots, pre-click screenshots, and post-click
-screenshots to Telegram for audit. If the first entry leg clicks and a later leg
-fails, it attempts reduce-only rollback for the already-clicked entry leg and
-does not archive the batch as `clicked`.
+attempts to send leg preview screenshots, pre-click screenshots, and post-click
+screenshots to Telegram for audit. In fully automated mode those audit messages
+are best-effort, so a Telegram `ETIMEDOUT` should be logged without killing the
+request watcher or blocking the click path. If the first entry leg clicks and a
+later leg fails, it attempts reduce-only rollback for the already-clicked entry
+leg and does not archive the batch as `clicked`.

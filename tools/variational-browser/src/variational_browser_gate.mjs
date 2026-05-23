@@ -92,6 +92,24 @@ class TelegramApprovalClient {
     return result.result;
   }
 
+  async trySendMessage(text, inlineKeyboard = undefined, label = "sendMessage") {
+    try {
+      return await this.sendMessage(text, inlineKeyboard);
+    } catch (error) {
+      console.warn(`[telegram] ${label} failed: ${error.message}`);
+      return null;
+    }
+  }
+
+  async trySendPhoto(filePath, caption = "", inlineKeyboard = undefined, label = "sendPhoto") {
+    try {
+      return await this.sendPhoto(filePath, caption, inlineKeyboard);
+    } catch (error) {
+      console.warn(`[telegram] ${label} failed: ${error.message}`);
+      return null;
+    }
+  }
+
   async requestApproval({ title, body, screenshotPath = "", approveLabel = "Approve", rejectLabel = "Reject", timeoutMs }) {
     const id = randomId();
     const expiresAt = Date.now() + (timeoutMs ?? this.timeoutMs);
@@ -438,14 +456,14 @@ class VariationalBrowserGate {
   }
 
   async watchRequests() {
-    await this.telegram.sendMessage([
+    await this.telegram.trySendMessage([
       "[Variational Browser] request watcher started",
       `dir: ${this.config.requestDir}`,
       `dry_run: ${this.config.dryRun}`,
       `auto_click_open: ${this.config.autoClickOpen}`,
       `auto_click_open_max_size_usd: ${this.config.autoClickOpenMaxSizeUsd}`,
       `auto_click_reduce_only: ${this.config.autoClickReduceOnly}`,
-    ].join("\n"));
+    ].join("\n"), undefined, "request watcher startup status");
 
     while (true) {
       const files = (await fs.promises.readdir(this.config.requestDir))
@@ -456,7 +474,11 @@ class VariationalBrowserGate {
         try {
           await this.processRequestFile(filePath);
         } catch (error) {
-          await this.telegram.sendMessage(`[Variational Browser] request failed\nfile: ${name}\n${error.stack || error.message}`);
+          await this.telegram.trySendMessage(
+            `[Variational Browser] request failed\nfile: ${name}\n${error.stack || error.message}`,
+            undefined,
+            "request failure notice",
+          );
         }
       }
       await sleep(this.config.watchIntervalMs);
@@ -484,7 +506,7 @@ class VariationalBrowserGate {
     console.log(`[Variational Browser] wallet stage: ${walletState.stage}`);
     if (walletState.stage !== "ready") {
       const notReadyPath = await this.captureScreenshot(`${request.id || "request"}-wallet-not-ready`);
-      await this.telegram.sendPhoto(
+      await this.telegram.trySendPhoto(
         notReadyPath,
         [
           "[Variational Browser] request blocked: wallet not ready",
@@ -495,6 +517,8 @@ class VariationalBrowserGate {
           `wallet_prompt_visible: ${walletState.walletPromptVisible}`,
           "Run --status / --authenticate / --connect-wallet before retrying this request.",
         ].join("\n").slice(0, 1024),
+        undefined,
+        "wallet not ready screenshot",
       );
       return { status: `wallet_${walletState.stage}` };
     }
@@ -508,7 +532,7 @@ class VariationalBrowserGate {
       console.log(`[Variational Browser] wallet stage after setup: ${postSetupState.stage}`);
       if (postSetupState.stage !== "ready") {
         const notReadyPath = await this.captureScreenshot(`${request.id || "request"}-wallet-not-ready-after-setup`);
-        await this.telegram.sendPhoto(
+        await this.telegram.trySendPhoto(
           notReadyPath,
           [
             "[Variational Browser] request blocked after order setup: wallet not ready",
@@ -518,6 +542,8 @@ class VariationalBrowserGate {
             `authenticate_visible: ${postSetupState.authenticateVisible}`,
             `wallet_prompt_visible: ${postSetupState.walletPromptVisible}`,
           ].join("\n").slice(0, 1024),
+          undefined,
+          "wallet not ready after setup screenshot",
         );
         return { status: `wallet_${postSetupState.stage}` };
       }
@@ -534,12 +560,18 @@ class VariationalBrowserGate {
     const dryRun = request.dryRun ?? this.config.dryRun;
 
     if (autoReduceOnly) {
-      await this.telegram.sendPhoto(
+      await this.telegram.trySendPhoto(
         screenshotPath,
         this.buildAutoReduceOnlyCaption(request, confirmCandidates),
+        undefined,
+        "auto reduce-only preview",
       );
       if (dryRun) {
-        await this.telegram.sendMessage(`[Variational Browser] reduce-only dry-run, click skipped\nid: ${request.id}`);
+        await this.telegram.trySendMessage(
+          `[Variational Browser] reduce-only dry-run, click skipped\nid: ${request.id}`,
+          undefined,
+          "auto reduce-only dry-run notice",
+        );
         console.log("[Variational Browser] reduce-only dry-run, click skipped");
         return { status: "dryrun" };
       }
@@ -548,7 +580,12 @@ class VariationalBrowserGate {
       await this.clickConfirm(request, confirmCandidates);
       await this.page.waitForTimeout(Number(request.afterClickDelayMs ?? this.config.afterClickDelayMs));
       const afterPath = await this.captureScreenshot(`${request.id || "request"}-after`);
-      await this.telegram.sendPhoto(afterPath, `[Variational Browser] reduce-only clicked\nid: ${request.id}`);
+      await this.telegram.trySendPhoto(
+        afterPath,
+        `[Variational Browser] reduce-only clicked\nid: ${request.id}`,
+        undefined,
+        "auto reduce-only clicked screenshot",
+      );
       console.log("[Variational Browser] reduce-only final click completed");
       return { status: "clicked" };
     }
@@ -564,13 +601,21 @@ class VariationalBrowserGate {
     });
 
     if (!decision.approved) {
-      await this.telegram.sendMessage(`[Variational Browser] rejected\nid: ${request.id}\nreason: ${decision.reason}`);
+      await this.telegram.trySendMessage(
+        `[Variational Browser] rejected\nid: ${request.id}\nreason: ${decision.reason}`,
+        undefined,
+        "manual reject notice",
+      );
       console.log(`[Variational Browser] request rejected: ${decision.reason}`);
       return { status: "rejected", reason: decision.reason };
     }
 
     if (dryRun) {
-      await this.telegram.sendMessage(`[Variational Browser] dry-run approved, click skipped\nid: ${request.id}`);
+      await this.telegram.trySendMessage(
+        `[Variational Browser] dry-run approved, click skipped\nid: ${request.id}`,
+        undefined,
+        "manual dry-run notice",
+      );
       console.log("[Variational Browser] dry-run approved, click skipped");
       return { status: "dryrun" };
     }
@@ -579,7 +624,12 @@ class VariationalBrowserGate {
     await this.clickConfirm(request, confirmCandidates);
     await this.page.waitForTimeout(Number(request.afterClickDelayMs ?? this.config.afterClickDelayMs));
     const afterPath = await this.captureScreenshot(`${request.id || "request"}-after`);
-    await this.telegram.sendPhoto(afterPath, `[Variational Browser] clicked\nid: ${request.id}`);
+    await this.telegram.trySendPhoto(
+      afterPath,
+      `[Variational Browser] clicked\nid: ${request.id}`,
+      undefined,
+      "manual clicked screenshot",
+    );
     console.log("[Variational Browser] final click completed");
     return { status: "clicked" };
   }
@@ -601,14 +651,25 @@ class VariationalBrowserGate {
       for (const leg of legs) {
         const preview = await this.prepareRequestPreview(leg, `${request.id || "batch"}-${leg.variationalOrder?.symbol || "leg"}-preview`);
         previews.push({ leg, ...preview });
-        await this.telegram.sendPhoto(
-          preview.screenshotPath,
-          this.buildBatchPreviewCaption(leg, preview.confirmCandidates),
-        );
+        const caption = this.buildBatchPreviewCaption(leg, preview.confirmCandidates);
+        if (autoOpen) {
+          await this.telegram.trySendPhoto(
+            preview.screenshotPath,
+            caption,
+            undefined,
+            "auto batch open preview",
+          );
+        } else {
+          await this.telegram.sendPhoto(preview.screenshotPath, caption);
+        }
       }
 
       if (autoOpen) {
-        await this.telegram.sendMessage(this.buildAutoBatchOpenCaption(request, legs, previews));
+        await this.telegram.trySendMessage(
+          this.buildAutoBatchOpenCaption(request, legs, previews),
+          undefined,
+          "auto batch open notice",
+        );
       } else {
         const decision = await this.telegram.requestApproval({
           title: "[Variational Browser] PAIR ORDER CLICK REQUEST",
@@ -618,17 +679,29 @@ class VariationalBrowserGate {
           timeoutMs: Number(request.approvalTimeoutMs ?? this.config.approvalTimeoutMs),
         });
         if (!decision.approved) {
-          await this.telegram.sendMessage(`[Variational Browser] batch rejected\nid: ${request.id}\nreason: ${decision.reason}`);
+          await this.telegram.trySendMessage(
+            `[Variational Browser] batch rejected\nid: ${request.id}\nreason: ${decision.reason}`,
+            undefined,
+            "batch reject notice",
+          );
           console.log(`[Variational Browser] batch rejected: ${decision.reason}`);
           return { status: "rejected", reason: decision.reason };
         }
       }
     } else {
-      await this.telegram.sendMessage(this.buildAutoBatchReduceOnlyCaption(request, legs));
+      await this.telegram.trySendMessage(
+        this.buildAutoBatchReduceOnlyCaption(request, legs),
+        undefined,
+        "auto batch reduce-only notice",
+      );
     }
 
     if (dryRun) {
-      await this.telegram.sendMessage(`[Variational Browser] batch dry-run, clicks skipped\nid: ${request.id}`);
+      await this.telegram.trySendMessage(
+        `[Variational Browser] batch dry-run, clicks skipped\nid: ${request.id}`,
+        undefined,
+        "batch dry-run notice",
+      );
       console.log("[Variational Browser] batch dry-run, clicks skipped");
       return { status: "dryrun" };
     }
@@ -636,20 +709,24 @@ class VariationalBrowserGate {
     if (autoReduceOnly) {
       const result = await this.clickAutoReduceOnlyBatch(legs, request);
       if (result.failures.length) {
-        await this.telegram.sendMessage([
+        await this.telegram.trySendMessage([
           "[Variational Browser] batch reduce-only partially failed",
           `id: ${request.id}`,
           `clicked_legs: ${result.successes.map((leg) => leg.variationalOrder?.symbol).join(",") || "none"}`,
           "failed_legs:",
           ...result.failures.map(({ leg, error }) => `- ${leg.variationalOrder?.symbol || "leg"}: ${error.message}`),
-        ].join("\n"));
+        ].join("\n"), undefined, "batch reduce-only partial failure notice");
         return {
           status: result.successes.length ? "partial_failed" : "failed",
           reason: result.failures.map(({ leg, error }) => `${leg.variationalOrder?.symbol || "leg"}=${error.message}`).join("; "),
         };
       }
 
-      await this.telegram.sendMessage(`[Variational Browser] batch clicked\nid: ${request.id}\nlegs: ${legs.length}`);
+      await this.telegram.trySendMessage(
+        `[Variational Browser] batch clicked\nid: ${request.id}\nlegs: ${legs.length}`,
+        undefined,
+        "batch reduce-only clicked notice",
+      );
       return { status: "clicked" };
     }
 
@@ -663,19 +740,23 @@ class VariationalBrowserGate {
       }
     } catch (error) {
       if (!autoReduceOnly && clickedLegs.length) {
-        await this.telegram.sendMessage([
+        await this.telegram.trySendMessage([
           "[Variational Browser] batch partially clicked; attempting rollback",
           `id: ${request.id}`,
           `clicked_legs: ${clickedLegs.map((leg) => leg.variationalOrder?.symbol).join(",")}`,
           `error: ${error.message}`,
-        ].join("\n"));
+        ].join("\n"), undefined, "batch rollback notice");
         const rollbackOk = await this.rollbackClickedOpenLegs(clickedLegs, request.id);
         return { status: rollbackOk ? "rolledback" : "partial_failed", reason: error.message };
       }
       throw error;
     }
 
-    await this.telegram.sendMessage(`[Variational Browser] batch clicked\nid: ${request.id}\nlegs: ${legs.length}`);
+    await this.telegram.trySendMessage(
+      `[Variational Browser] batch clicked\nid: ${request.id}\nlegs: ${legs.length}`,
+      undefined,
+      "batch clicked notice",
+    );
     return { status: "clicked" };
   }
 
@@ -693,12 +774,12 @@ class VariationalBrowserGate {
       for (const leg of pending) {
         try {
           if (attempt > 1) {
-            await this.telegram.sendMessage([
+            await this.telegram.trySendMessage([
               "[Variational Browser] retrying reduce-only leg",
               `batch_id: ${request.id || ""}`,
               `attempt: ${attempt}/${attempts}`,
               `leg: ${leg.variationalOrder?.symbol || "leg"}`,
-            ].join("\n"));
+            ].join("\n"), undefined, "reduce-only retry notice");
           }
           await this.clickPreparedRequest(leg, {
             screenshotPrefix: `${request.id || "batch"}-${leg.variationalOrder?.symbol || "leg"}-attempt${attempt}`,
@@ -708,13 +789,13 @@ class VariationalBrowserGate {
         } catch (error) {
           failures.push({ leg, error });
           nextPending.push(leg);
-          await this.telegram.sendMessage([
+          await this.telegram.trySendMessage([
             "[Variational Browser] reduce-only leg failed",
             `batch_id: ${request.id || ""}`,
             `attempt: ${attempt}/${attempts}`,
             `leg: ${leg.variationalOrder?.symbol || "leg"}`,
             `error: ${error.message}`,
-          ].join("\n"));
+          ].join("\n"), undefined, "reduce-only leg failure notice");
         }
       }
 
@@ -767,16 +848,20 @@ class VariationalBrowserGate {
 
   async clickPreparedRequest(request, { screenshotPrefix, clickedCaption }) {
     const prepared = await this.prepareRequestPreview(request, `${screenshotPrefix}-before-click`);
-    await this.telegram.sendPhoto(
+    await this.telegram.trySendPhoto(
       prepared.screenshotPath,
       `[Variational Browser] prepared click\nid: ${request.id}\nleg: ${request.variationalOrder?.symbol || ""}`,
+      undefined,
+      "prepared click screenshot",
     );
     await this.clickConfirm(request, prepared.confirmCandidates);
     await this.page.waitForTimeout(Number(request.afterClickDelayMs ?? this.config.afterClickDelayMs));
     const afterPath = await this.captureScreenshot(`${screenshotPrefix}-after`);
-    await this.telegram.sendPhoto(
+    await this.telegram.trySendPhoto(
       afterPath,
       `[Variational Browser] ${clickedCaption}\nid: ${request.id}\nleg: ${request.variationalOrder?.symbol || ""}`,
+      undefined,
+      "clicked screenshot",
     );
   }
 
@@ -791,12 +876,12 @@ class VariationalBrowserGate {
         });
       } catch (error) {
         ok = false;
-        await this.telegram.sendMessage([
+        await this.telegram.trySendMessage([
           "[Variational Browser] rollback failed",
           `batch_id: ${batchId}`,
           `leg: ${rollback.variationalOrder.symbol}`,
           `error: ${error.message}`,
-        ].join("\n"));
+        ].join("\n"), undefined, "rollback failure notice");
       }
     }
     return ok;
