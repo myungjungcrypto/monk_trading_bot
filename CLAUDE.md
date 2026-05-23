@@ -824,6 +824,7 @@ Warmup complete from binance: ...
 
 ```env
 VARIATIONAL_BROWSER_COMPLETION_TIMEOUT_SEC=360
+VARIATIONAL_BROWSER_PROCESSING_TIMEOUT_SEC=900
 VARIATIONAL_BROWSER_COMPLETION_POLL_SEC=1
 VARIATIONAL_BROWSER_RECONCILE_WINDOW_SEC=600
 VARIATIONAL_BROWSER_AUTO_CLICK_OPEN=false
@@ -836,6 +837,7 @@ BOT_CONFIG_RELOAD_INTERVAL_SEC=15
 남은 주의점:
 
 - Telegram 승인 timeout, 거절, browser daemon 중단은 자동 방어한다. 다만 사용자가 Variational 웹에서 직접 주문/청산하거나, UI 변경으로 잘못된 버튼 후보가 탐지되면 대시보드 가상 포지션과 실제 Variational 포지션이 어긋날 수 있다.
+- Browser daemon은 request 처리 시작 시 파일을 `.json.processing`으로 claim한다. Backend는 `.processing` 상태의 요청을 abort로 rename하지 않고 `VARIATIONAL_BROWSER_PROCESSING_TIMEOUT_SEC` 동안 최종 `.clicked.done`/실패 marker를 기다린다. 이는 browser가 이미 클릭 중인데 backend가 먼저 포기해서 실제 포지션만 생기는 race를 줄이기 위한 장치다.
 - 따라서 live 테스트는 계속 소액으로 진행하고, Telegram screenshot의 `symbol`, `side`, `quantity`, `reduceOnly`, `confirm_button_candidates`를 확인해야 한다.
 - `tools/variational-wallet`과 `tools/variational-browser`가 같은 Telegram bot token으로 동시에 polling하면 callback을 서로 가져갈 수 있다. 가능하면 브라우저 승인용 bot token을 분리한다.
 - Variational 공식 trading API가 생기면 browser click gate는 제거하고 API execution adapter로 교체하는 것이 최종 목표다.

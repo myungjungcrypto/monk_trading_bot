@@ -35,6 +35,7 @@ class VariationalBrowserRequestConfig:
     max_age_sec: int = 300
     approval_timeout_sec: int = 120
     completion_timeout_sec: int = 360
+    processing_timeout_sec: int = 900
     completion_poll_sec: float = 1.0
     legs: str = "both"
     btc_qty_decimals: int = 6
@@ -54,6 +55,7 @@ class VariationalBrowserRequestConfig:
             max_age_sec=int(os.getenv("VARIATIONAL_REQUEST_MAX_AGE_SEC", "300")),
             approval_timeout_sec=int(os.getenv("VARIATIONAL_BROWSER_APPROVAL_TIMEOUT_SEC", "120")),
             completion_timeout_sec=int(os.getenv("VARIATIONAL_BROWSER_COMPLETION_TIMEOUT_SEC", "360")),
+            processing_timeout_sec=int(os.getenv("VARIATIONAL_BROWSER_PROCESSING_TIMEOUT_SEC", "900")),
             completion_poll_sec=float(os.getenv("VARIATIONAL_BROWSER_COMPLETION_POLL_SEC", "1")),
             legs=os.getenv("VARIATIONAL_BROWSER_ENGINE_LEGS", "both"),
             btc_qty_decimals=int(os.getenv("VARIATIONAL_BROWSER_BTC_QTY_DECIMALS", "6")),
@@ -211,6 +213,17 @@ class VariationalBrowserRequestBridge:
             if pending:
                 await asyncio.sleep(max(self.config.completion_poll_sec, 0.1))
 
+        processing_deadline = time.monotonic() + max(self.config.processing_timeout_sec, 0)
+        while pending and any(request_processing(path) for path in pending) and time.monotonic() <= processing_deadline:
+            for path in list(pending):
+                completion = request_completion(path)
+                if completion is None:
+                    continue
+                completions.append(completion)
+                pending.remove(path)
+            if pending and any(request_processing(path) for path in pending):
+                await asyncio.sleep(max(self.config.completion_poll_sec, 0.1))
+
         for path in sorted(pending):
             completion = request_completion(path)
             if completion is not None:
@@ -362,8 +375,18 @@ def request_completion(path: Path) -> Optional[VariationalBrowserRequestCompleti
     )
 
 
+def request_processing(path: Path) -> bool:
+    return Path(f"{path}.processing").exists()
+
+
 def abort_pending_request(path: Path) -> VariationalBrowserRequestCompletion:
     done_path = Path(f"{path}.aborted.done")
+    if request_processing(path):
+        return VariationalBrowserRequestCompletion(
+            path=path,
+            status="processing_timeout",
+            done_path=Path(f"{path}.processing"),
+        )
     try:
         path.rename(done_path)
         return VariationalBrowserRequestCompletion(path=path, status="aborted", done_path=done_path)

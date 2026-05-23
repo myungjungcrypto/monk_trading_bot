@@ -315,9 +315,14 @@ two BTC/ETH legs are written as a single batch file, preventing one leg from
 expiring before the other file is processed. Failed reduce-only close legs are
 retried before the daemon reports a partial failure.
 
-The daemon archives processed request files as `*.done`. Expired or malformed
-requests are archived as `*.expired.done` / `*.failed.done` so an old file cannot
-block the watcher forever.
+The daemon claims a request by renaming it to `*.json.processing` before it
+touches the Variational UI, then archives the final result as `*.done`. Expired
+or malformed requests are archived as `*.expired.done` / `*.failed.done` so an
+old file cannot block the watcher forever. The backend will not rename an
+already-claimed `.processing` request to `aborted`; it waits up to
+`VARIATIONAL_BROWSER_PROCESSING_TIMEOUT_SEC` for the daemon to write a final
+`.clicked.done` / failure marker. This avoids the dangerous race where the
+browser is already clicking but the backend gives up and records no DB position.
 
 ## Live Clicks
 

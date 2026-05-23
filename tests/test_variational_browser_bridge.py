@@ -33,14 +33,17 @@ class FakeOracle:
         }
 
 
-def config(tmp_path):
-    return VariationalBrowserRequestConfig(
-        request_dir=tmp_path,
-        dry_run=True,
-        approval_timeout_sec=180,
-        completion_timeout_sec=1,
-        completion_poll_sec=0.1,
-    )
+def config(tmp_path, **overrides):
+    values = {
+        "request_dir": tmp_path,
+        "dry_run": True,
+        "approval_timeout_sec": 180,
+        "completion_timeout_sec": 1,
+        "processing_timeout_sec": 1,
+        "completion_poll_sec": 0.1,
+    }
+    values.update(overrides)
+    return VariationalBrowserRequestConfig(**values)
 
 
 def test_bridge_writes_entry_requests(tmp_path):
@@ -149,5 +152,55 @@ def test_wait_for_batch_completion_aborts_unprocessed_requests(tmp_path):
         assert {completion.status for completion in completions} == {"aborted"}
         assert all(not path.exists() for path in batch.paths)
         assert all((tmp_path / f"{path.name}.aborted.done").exists() for path in batch.paths)
+
+    asyncio.run(run())
+
+
+def test_wait_for_batch_completion_waits_for_processing_request(tmp_path):
+    async def run():
+        bridge = VariationalBrowserRequestBridge(config(tmp_path), FakeOracle())
+        batch = await bridge.create_entry_requests(
+            direction=PairDirection.LONG_BTC_SHORT_ETH,
+            size_usd=50,
+        )
+        path = batch.paths[0]
+        processing_path = tmp_path / f"{path.name}.processing"
+        done_path = tmp_path / f"{path.name}.clicked.done"
+        path.rename(processing_path)
+
+        async def complete_later():
+            await asyncio.sleep(0.2)
+            processing_path.rename(done_path)
+
+        task = asyncio.create_task(complete_later())
+        completions = await bridge.wait_for_batch_completion(batch, timeout_sec=0)
+        await task
+
+        assert completions_all_clicked(completions)
+        assert {completion.status for completion in completions} == {"clicked"}
+
+    asyncio.run(run())
+
+
+def test_wait_for_batch_completion_does_not_abort_processing_request(tmp_path):
+    async def run():
+        bridge = VariationalBrowserRequestBridge(
+            config(tmp_path, processing_timeout_sec=0),
+            FakeOracle(),
+        )
+        batch = await bridge.create_entry_requests(
+            direction=PairDirection.LONG_BTC_SHORT_ETH,
+            size_usd=50,
+        )
+        path = batch.paths[0]
+        processing_path = tmp_path / f"{path.name}.processing"
+        path.rename(processing_path)
+
+        completions = await bridge.wait_for_batch_completion(batch, timeout_sec=0)
+
+        assert not completions_all_clicked(completions)
+        assert {completion.status for completion in completions} == {"processing_timeout"}
+        assert processing_path.exists()
+        assert not (tmp_path / f"{path.name}.aborted.done").exists()
 
     asyncio.run(run())

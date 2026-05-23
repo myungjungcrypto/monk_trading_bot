@@ -429,25 +429,27 @@ class VariationalBrowserGate {
   }
 
   async processRequestFile(filePath) {
-    const raw = await fs.promises.readFile(filePath, "utf8");
+    const processingPath = `${filePath}.processing`;
+    await fs.promises.rename(filePath, processingPath);
+    const raw = await fs.promises.readFile(processingPath, "utf8");
     try {
       const request = JSON.parse(raw);
       request.id ||= path.basename(filePath, path.extname(filePath));
       const result = await this.processRequest(request);
-      await this.archiveRequestFile(filePath, raw, result.status);
+      await this.archiveRequestFile(processingPath, raw, result.status, filePath);
       return result;
     } catch (error) {
       const status = String(error?.message || "").startsWith("request expired:")
         ? "expired"
         : "failed";
-      await this.archiveRequestFile(filePath, raw, status);
+      await this.archiveRequestFile(processingPath, raw, status, filePath);
       error.archivedStatus = status;
       throw error;
     }
   }
 
-  async archiveRequestFile(filePath, raw, status) {
-    const donePath = `${filePath}.${status}.done`;
+  async archiveRequestFile(filePath, raw, status, originalPath = filePath) {
+    const donePath = `${originalPath}.${status}.done`;
     await fs.promises.rename(filePath, donePath).catch(async () => {
       await fs.promises.writeFile(donePath, raw);
       await fs.promises.unlink(filePath).catch(() => {});
