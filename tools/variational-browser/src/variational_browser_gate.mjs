@@ -662,7 +662,7 @@ class VariationalBrowserGate {
     }
 
     const autoReduceOnly = legs.every((leg) => this.shouldAutoClickReduceOnly(leg));
-    const autoOpen = this.shouldAutoClickOpenBatch(request, legs);
+    const autoOpen = autoReduceOnly ? false : this.shouldAutoClickOpenBatch(request, legs);
     const dryRun = request.dryRun ?? this.config.dryRun;
     const clickedLegs = [];
     console.log(`[Variational Browser] processing batch request: ${request.id || "(no id)"} legs=${legs.length}`);
