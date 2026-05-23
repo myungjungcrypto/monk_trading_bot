@@ -216,7 +216,9 @@ discoverable in Variational's rendered DOM, the gate can fall back to viewport
 click points through `VARIATIONAL_BROWSER_BUY_FALLBACK_POINT` and
 `VARIATIONAL_BROWSER_SELL_FALLBACK_POINT`. If the Size field is not a normal
 DOM input, it can fall back to `VARIATIONAL_BROWSER_SIZE_FALLBACK_POINT` and
-type the generated quantity there. Keep this in dry-run until the Telegram
+type the generated quantity there. The fallback refuses to press `Ctrl+A` unless
+the click focused an editable input, so it cannot accidentally select the whole
+page and continue as if size was filled. Keep this in dry-run until the Telegram
 screenshot confirms the correct side and size are selected.
 
 For close requests, `variationalOrder.reduceOnly=true` causes the gate to enable

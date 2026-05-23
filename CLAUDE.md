@@ -718,6 +718,7 @@ python -m backend.scripts.create_variational_browser_request \
 - 진입/청산 신호, 텔레그램 승인 요약, 주문 직전 sanity check는 외부 median fair price를 기준으로 한다.
 - 3개 중 1개 소스가 응답하지 않아도 2개 이상이면 진행 가능하다.
 - Browser gate는 `variationalOrder`가 있으면 symbol 페이지 이동 → Market 탭 → Buy/Sell 선택 → Size 입력 → 스크린샷 승인 순서로 처리한다.
+- Size fallback은 클릭 후 실제 editable input이 포커스된 경우에만 `Ctrl+A`와 quantity 입력을 수행한다. 포커스가 body 등에 남아 있으면 페이지 전체 선택을 방지하고 request를 실패 처리한다.
 - `variationalOrder.reduceOnly=true`이면 Reduce Only 체크박스를 켠 뒤 Size를 입력한다.
 - 새 요청의 기본 `confirmSelector`는 `auto`다. Browser gate는 주문 패널 영역의 활성 버튼 후보를 텔레그램 메시지에 표시하고, broad selector(`body`, `html`, `*`)는 live click에서 차단한다.
 - `variationalOrder` live click은 `Buy BTC`, `Sell ETH`처럼 side+symbol이 보이는 confirm button만 허용한다. 텍스트가 빈 버튼 후보는 클릭하지 않고 request를 실패 처리한다.

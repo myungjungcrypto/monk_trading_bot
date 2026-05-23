@@ -1002,9 +1002,42 @@ class VariationalBrowserGate {
     const y = Math.round(viewport.height * point.y);
     console.log(`[Variational Browser] size input selector not found; typing via fallback point x=${x} y=${y}`);
     await this.page.mouse.click(x, y);
+    const focus = await this.focusedEditableInfo();
+    if (!focus.editable) {
+      await this.clearPageSelection();
+      throw new Error(
+        `Size fallback point did not focus an editable input (active=${focus.tag || "none"} role=${focus.role || ""}). ` +
+        "Refusing to press Ctrl+A because it would select the page instead of the size field.",
+      );
+    }
     await this.page.keyboard.press("Control+A");
     await this.page.keyboard.type(String(quantity));
-    return `fallback:${point.x},${point.y}`;
+    return `fallback:${point.x},${point.y}:${focus.tag}`;
+  }
+
+  async focusedEditableInfo() {
+    return this.page.evaluate(() => {
+      const element = document.activeElement;
+      if (!element) return { editable: false, tag: "" };
+      const tag = String(element.tagName || "").toLowerCase();
+      const role = element.getAttribute("role") || "";
+      const type = element.getAttribute("type") || "";
+      const editable = Boolean(
+        element.isContentEditable
+        || tag === "input"
+        || tag === "textarea"
+        || role === "spinbutton"
+        || role === "textbox",
+      );
+      return { editable, tag, role, type };
+    });
+  }
+
+  async clearPageSelection() {
+    await this.page.evaluate(() => {
+      const selection = window.getSelection?.();
+      if (selection) selection.removeAllRanges();
+    }).catch(() => {});
   }
 
   async runSteps(steps) {
@@ -1389,6 +1422,7 @@ class VariationalBrowserGate {
   }
 
   async captureScreenshot(id) {
+    await this.clearPageSelection();
     const safeId = String(id).replace(/[^a-zA-Z0-9_.-]/g, "_");
     const filePath = path.join(this.config.screenshotDir, `${new Date().toISOString().replace(/[:.]/g, "-")}_${safeId}.png`);
     await this.page.screenshot({ path: filePath, fullPage: true });
@@ -1614,6 +1648,8 @@ function loadConfig() {
       'input[name*="size" i]',
       'input[aria-label*="Size" i]',
       'input[type="number"]',
+      '[role="spinbutton"]',
+      '[role="textbox"]',
       '[contenteditable="true"]',
       'input',
     ]),
@@ -1629,7 +1665,7 @@ function loadConfig() {
     orderBuyFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_BUY_FALLBACK_POINT", "0.82,0.186")),
     orderSellFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_SELL_FALLBACK_POINT", "0.94,0.186")),
     orderSizeFallbackEnabled: envBool("VARIATIONAL_BROWSER_SIZE_FALLBACK_ENABLED", true),
-    orderSizeFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_SIZE_FALLBACK_POINT", "0.93,0.292")),
+    orderSizeFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_SIZE_FALLBACK_POINT", "0.948,0.266")),
     reduceOnlyTimeoutMs: Number(env("VARIATIONAL_BROWSER_REDUCE_ONLY_TIMEOUT_MS", "2000")),
     reduceOnlyFallbackEnabled: envBool("VARIATIONAL_BROWSER_REDUCE_ONLY_FALLBACK_ENABLED", true),
     reduceOnlyFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_REDUCE_ONLY_FALLBACK_POINT", "0.768,0.364")),
