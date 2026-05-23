@@ -329,6 +329,9 @@ The approval message should show a sane `confirm_button_candidates` entry before
 you approve a live click. If no candidate is found, the live click is blocked
 unless `VARIATIONAL_BROWSER_CONFIRM_FALLBACK_ENABLED=true` is explicitly set.
 Keep order size small and use a dedicated Variational wallet.
+For `variationalOrder` requests, the auto confirm candidate must have visible
+button text that matches the intended side and symbol, such as `Buy BTC` or
+`Sell ETH`; blank button candidates are refused in live mode.
 
 For fully automated entry after live screenshots are verified:
 

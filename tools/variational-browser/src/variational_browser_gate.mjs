@@ -1060,6 +1060,7 @@ class VariationalBrowserGate {
         if (/ORDER|PLACE|SUBMIT|LONG|SHORT|BUY|SELL/i.test(text)) score += 8;
         if (/CONNECT|AUTHENTICATE|TRANSFER|MARKET|LIMIT|CROSS|PRO|TP\/SL|50X/i.test(text)) score -= 20;
         if (/ENTER SIZE/i.test(text)) score -= 40;
+        if (!text) score -= 100;
         if (disabled) score -= 60;
         return {
           index,
@@ -1092,7 +1093,10 @@ class VariationalBrowserGate {
       return `selector:${selector}`;
     }
 
-    const candidate = confirmCandidates.find((item) => !item.disabled) || (await this.getConfirmCandidates(request.variationalOrder)).find((item) => !item.disabled);
+    const candidate =
+      confirmCandidates.find((item) => this.isUsableConfirmCandidate(item, request.variationalOrder))
+      || (await this.getConfirmCandidates(request.variationalOrder))
+        .find((item) => this.isUsableConfirmCandidate(item, request.variationalOrder));
     if (candidate) {
       console.log(`[Variational Browser] auto confirm candidate: #${candidate.index} "${candidate.text}" score=${candidate.score}`);
       await this.page.locator("button").nth(candidate.index).click();
@@ -1110,6 +1114,26 @@ class VariationalBrowserGate {
     console.log(`[Variational Browser] confirm candidate not found; clicking fallback point x=${x} y=${y}`);
     await this.page.mouse.click(x, y);
     return `fallback:${point.x},${point.y}`;
+  }
+
+  isUsableConfirmCandidate(candidate, order = undefined) {
+    if (!candidate || candidate.disabled) return false;
+    const text = String(candidate.text || "").replace(/\s+/g, " ").trim();
+    if (!text) return false;
+    if (!order) return true;
+
+    const upper = text.toUpperCase();
+    if (/CONNECT|AUTHENTICATE|TRANSFER|MARKET|LIMIT|CROSS|PRO|TP\/SL|50X|ENTER SIZE/i.test(text)) {
+      return false;
+    }
+
+    const side = String(order.side || "").toUpperCase();
+    const symbol = String(order.symbol || "").toUpperCase();
+    const sideOk = side
+      ? upper.includes(side) || (side === "BUY" && upper.includes("LONG")) || (side === "SELL" && upper.includes("SHORT"))
+      : /BUY|SELL|LONG|SHORT|ORDER|PLACE|SUBMIT/i.test(text);
+    const symbolOk = symbol ? upper.includes(symbol) : true;
+    return sideOk && symbolOk;
   }
 
   async waitForWalletReady() {
