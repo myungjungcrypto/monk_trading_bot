@@ -36,11 +36,12 @@ function requireEnv(name, fallbackName = "") {
 }
 
 class TelegramApprovalClient {
-  constructor({ token, chatId, allowedUserIds, timeoutMs, prefix = "vb" }) {
+  constructor({ token, chatId, allowedUserIds, timeoutMs, bestEffortTimeoutMs = 3000, prefix = "vb" }) {
     this.token = token;
     this.chatId = chatId;
     this.allowedUserIds = new Set(allowedUserIds.map(String));
     this.timeoutMs = timeoutMs;
+    this.bestEffortTimeoutMs = bestEffortTimeoutMs;
     this.prefix = prefix;
     this.offset = 0;
     this.pending = new Map();
@@ -65,7 +66,7 @@ class TelegramApprovalClient {
     }
   }
 
-  async sendMessage(text, inlineKeyboard = undefined) {
+  async sendMessage(text, inlineKeyboard = undefined, options = {}) {
     const payload = {
       chat_id: this.chatId,
       text,
@@ -74,11 +75,11 @@ class TelegramApprovalClient {
     if (inlineKeyboard) {
       payload.reply_markup = { inline_keyboard: inlineKeyboard };
     }
-    const result = await this.call("sendMessage", payload);
+    const result = await this.call("sendMessage", payload, options);
     return result.result;
   }
 
-  async sendPhoto(filePath, caption = "", inlineKeyboard = undefined) {
+  async sendPhoto(filePath, caption = "", inlineKeyboard = undefined, options = {}) {
     const form = new FormData();
     form.set("chat_id", this.chatId);
     if (caption) form.set("caption", caption);
@@ -88,13 +89,13 @@ class TelegramApprovalClient {
       form.set("reply_markup", JSON.stringify({ inline_keyboard: inlineKeyboard }));
     }
 
-    const result = await this.callMultipart("sendPhoto", form);
+    const result = await this.callMultipart("sendPhoto", form, options);
     return result.result;
   }
 
   async trySendMessage(text, inlineKeyboard = undefined, label = "sendMessage") {
     try {
-      return await this.sendMessage(text, inlineKeyboard);
+      return await this.sendMessage(text, inlineKeyboard, { timeoutMs: this.bestEffortTimeoutMs });
     } catch (error) {
       console.warn(`[telegram] ${label} failed: ${error.message}`);
       return null;
@@ -103,7 +104,7 @@ class TelegramApprovalClient {
 
   async trySendPhoto(filePath, caption = "", inlineKeyboard = undefined, label = "sendPhoto") {
     try {
-      return await this.sendPhoto(filePath, caption, inlineKeyboard);
+      return await this.sendPhoto(filePath, caption, inlineKeyboard, { timeoutMs: this.bestEffortTimeoutMs });
     } catch (error) {
       console.warn(`[telegram] ${label} failed: ${error.message}`);
       return null;
@@ -202,12 +203,18 @@ class TelegramApprovalClient {
     });
   }
 
-  async call(method, payload, { abortable = false } = {}) {
+  async call(method, payload, { abortable = false, timeoutMs = 0 } = {}) {
     const url = `https://api.telegram.org/bot${this.token}/${method}`;
     let controller = null;
-    if (abortable) {
+    let timeout = null;
+    if (abortable || timeoutMs > 0) {
       controller = new AbortController();
-      this.pollAbortController = controller;
+      if (abortable) {
+        this.pollAbortController = controller;
+      }
+      if (timeoutMs > 0) {
+        timeout = setTimeout(() => controller.abort(), timeoutMs);
+      }
     }
     try {
       const response = await fetch(url, {
@@ -222,20 +229,31 @@ class TelegramApprovalClient {
       }
       return data;
     } finally {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
       if (controller && this.pollAbortController === controller) {
         this.pollAbortController = null;
       }
     }
   }
 
-  async callMultipart(method, form) {
+  async callMultipart(method, form, { timeoutMs = 0 } = {}) {
     const url = `https://api.telegram.org/bot${this.token}/${method}`;
-    const response = await fetch(url, { method: "POST", body: form });
-    const data = await response.json();
-    if (!response.ok || data.ok === false) {
-      throw new Error(`${method} failed: ${response.status} ${JSON.stringify(data).slice(0, 500)}`);
+    const controller = timeoutMs > 0 ? new AbortController() : null;
+    const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+    try {
+      const response = await fetch(url, { method: "POST", body: form, signal: controller?.signal });
+      const data = await response.json();
+      if (!response.ok || data.ok === false) {
+        throw new Error(`${method} failed: ${response.status} ${JSON.stringify(data).slice(0, 500)}`);
+      }
+      return data;
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
     }
-    return data;
   }
 }
 
@@ -247,6 +265,7 @@ class VariationalBrowserGate {
       chatId: config.telegramChatId,
       allowedUserIds: config.telegramAllowedUserIds,
       timeoutMs: config.approvalTimeoutMs,
+      bestEffortTimeoutMs: config.telegramBestEffortTimeoutMs,
     });
     this.context = null;
     this.page = null;
@@ -650,22 +669,6 @@ class VariationalBrowserGate {
 
     if (!autoReduceOnly) {
       const previews = [];
-      for (const leg of legs) {
-        const preview = await this.prepareRequestPreview(leg, `${request.id || "batch"}-${leg.variationalOrder?.symbol || "leg"}-preview`);
-        previews.push({ leg, ...preview });
-        const caption = this.buildBatchPreviewCaption(leg, preview.confirmCandidates);
-        if (autoOpen) {
-          await this.telegram.trySendPhoto(
-            preview.screenshotPath,
-            caption,
-            undefined,
-            "auto batch open preview",
-          );
-        } else {
-          await this.telegram.sendPhoto(preview.screenshotPath, caption);
-        }
-      }
-
       if (autoOpen) {
         await this.telegram.trySendMessage(
           this.buildAutoBatchOpenCaption(request, legs, previews),
@@ -673,6 +676,13 @@ class VariationalBrowserGate {
           "auto batch open notice",
         );
       } else {
+        for (const leg of legs) {
+          const preview = await this.prepareRequestPreview(leg, `${request.id || "batch"}-${leg.variationalOrder?.symbol || "leg"}-preview`);
+          previews.push({ leg, ...preview });
+          const caption = this.buildBatchPreviewCaption(leg, preview.confirmCandidates);
+          await this.telegram.sendPhoto(preview.screenshotPath, caption);
+        }
+
         const decision = await this.telegram.requestApproval({
           title: "[Variational Browser] PAIR ORDER CLICK REQUEST",
           body: this.buildBatchApprovalBody(request, legs, previews),
@@ -1766,6 +1776,7 @@ function loadConfig() {
     telegramToken: requireEnv("VARIATIONAL_BROWSER_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"),
     telegramChatId: requireEnv("VARIATIONAL_BROWSER_TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID"),
     telegramAllowedUserIds: envList("VARIATIONAL_BROWSER_TELEGRAM_ALLOWED_USER_IDS", envList("TELEGRAM_ALLOWED_USER_IDS", [])),
+    telegramBestEffortTimeoutMs: Number(env("VARIATIONAL_BROWSER_TELEGRAM_BEST_EFFORT_TIMEOUT_SEC", "3")) * 1000,
     runtimeDir,
   };
 }

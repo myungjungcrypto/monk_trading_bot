@@ -191,7 +191,7 @@ Backend-generated pair trades use a batch request by default:
 }
 ```
 
-For open batches, the browser sends leg preview screenshots and then one
+For manual open batches, the browser sends leg preview screenshots and then one
 Telegram `Click Pair` approval. After approval it sets up and clicks BTC/ETH
 sequentially. If the first entry leg clicks and a later leg fails, the browser
 attempts an immediate reduce-only rollback of the already-clicked entry leg and
@@ -199,8 +199,10 @@ archives the batch as `rolledback` rather than `clicked`.
 If `VARIATIONAL_BROWSER_AUTO_CLICK_OPEN=true`, the approval wait is skipped for
 these backend-created pair batches when the request is under
 `VARIATIONAL_BROWSER_AUTO_CLICK_OPEN_MAX_SIZE_USD`. In this automated path,
-Telegram screenshots and status messages are best-effort audit logs; a temporary
-Telegram API timeout should not stop the daemon from processing the batch.
+the browser skips the separate approval preview pass and goes directly into the
+per-leg prepared-click flow. Telegram screenshots and status messages are
+best-effort audit logs; a temporary Telegram API timeout should not stop the
+daemon from processing the batch.
 
 For close batches, every leg must be `action=close` and `reduceOnly=true`.
 Those batches are auto-clicked when `VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY`
@@ -354,9 +356,11 @@ VARIATIONAL_BROWSER_BATCH_REQUESTS=true
 ```
 
 Auto-open only applies to backend-created BTC/ETH batch requests. The daemon
-attempts to send leg preview screenshots, pre-click screenshots, and post-click
-screenshots to Telegram for audit. In fully automated mode those audit messages
-are best-effort, so a Telegram `ETIMEDOUT` should be logged without killing the
-request watcher or blocking the click path. If the first entry leg clicks and a
-later leg fails, it attempts reduce-only rollback for the already-clicked entry
-leg and does not archive the batch as `clicked`.
+skips the manual approval preview pass and attempts to send pre-click and
+post-click screenshots to Telegram for audit. In fully automated mode those
+audit messages are best-effort and bounded by
+`VARIATIONAL_BROWSER_TELEGRAM_BEST_EFFORT_TIMEOUT_SEC`, so a slow Telegram
+upload should be logged without killing the request watcher or blocking the
+click path for long. If the first entry leg clicks and a later leg fails, it
+attempts reduce-only rollback for the already-clicked entry leg and does not
+archive the batch as `clicked`.
