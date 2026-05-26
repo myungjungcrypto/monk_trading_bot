@@ -796,6 +796,7 @@ npm start -- --connect-wallet
 - 외부 공정가는 Binance, Lighter, Hyperliquid 중 살아 있는 소스의 median을 사용한다. Variational 화면 가격은 주문 UI 확인용이며 신호 기준가로 쓰지 않는다.
 - Lighter REST kline 403 문제 때문에 startup warmup은 Binance Futures klines를 우선 사용한다.
 - 실행 중 Settings 변경은 `BOT_CONFIG_RELOAD_INTERVAL_SEC` 간격으로 자동 반영된다. 텔레그램에는 `[Monk] CONFIG RELOADED`가 오며, 청산 조건은 열린 포지션에, 진입 조건과 size/leverage/cost는 다음 진입부터 적용된다.
+- 대시보드 Emergency Kill Switch가 추가되었다. 활성화하면 backend bot을 즉시 stop하고, 새 start/auto-resume을 차단하며, Variational browser daemon은 request 처리를 pause하고 최종 click 직전에도 kill switch 파일을 다시 확인한다.
 - 단일 다리 dry-run, BTC/ETH 다리 dry-run, Telegram 승인 후 live click, reduce-only close click이 소액 테스트에서 동작 확인되었다.
 - 2026-05-23 live 테스트에서 실제 Variational 주문은 체결됐지만 backend가 request를 `aborted`로 판단해 DB/프론트 포지션을 열지 않는 race가 확인되었다. 원인은 backend completion timeout 시점에 원본 `.json`을 `.aborted.done`으로 rename했지만, browser daemon이 이미 파일을 읽고 UI 클릭을 진행 중이면 실제 주문은 계속 들어갈 수 있었기 때문이다. 이후 browser가 처리 시작 즉시 `.json.processing`으로 claim하고 backend는 processing request를 abort하지 않도록 수정했다.
 
@@ -830,6 +831,7 @@ VARIATIONAL_BROWSER_COMPLETION_TIMEOUT_SEC=360
 VARIATIONAL_BROWSER_PROCESSING_TIMEOUT_SEC=900
 VARIATIONAL_BROWSER_COMPLETION_POLL_SEC=1
 VARIATIONAL_BROWSER_RECONCILE_WINDOW_SEC=600
+VARIATIONAL_BROWSER_KILL_SWITCH_PATH=tools/variational-browser/runtime/kill_switch.json
 VARIATIONAL_BROWSER_TELEGRAM_BEST_EFFORT_TIMEOUT_SEC=3
 VARIATIONAL_BROWSER_AUTO_CLICK_OPEN=false
 VARIATIONAL_BROWSER_AUTO_CLICK_OPEN_MAX_SIZE_USD=100
@@ -873,6 +875,20 @@ Variational Browser entry clicks confirmed
 ```
 
 주의: 자동 모드에서는 예전처럼 `PAIR LEG PREVIEW` 두 장이 먼저 오래 뜨는 흐름이 없어야 한다. 그 로그가 계속 보이면 EC2가 최신 코드를 pull/restart하지 않았거나, 수동 승인 모드로 실행 중인 것이다.
+
+Emergency Kill Switch:
+
+- Dashboard의 `Kill Switch`는 `/api/bot/kill-switch`를 호출해 `tools/variational-browser/runtime/kill_switch.json`을 활성화한다.
+- 활성 상태에서는 FastAPI가 bot start를 `423`으로 거부하고, backend 재시작 시 open trade auto-resume도 건너뛴다.
+- Variational browser daemon은 kill switch가 active이면 새 request 파일 처리를 멈추고, 이미 클릭 직전인 경로도 `clickConfirm()`에서 한 번 더 차단한다.
+- `Reset Kill`은 kill switch만 해제한다. 봇은 자동 재시작하지 않으므로, 실제 Variational 포지션 상태를 확인한 뒤 수동으로 다시 `Run Swing`/start 해야 한다.
+- Kill switch를 누르는 순간 이미 첫 다리 click이 끝난 상태라면 두 번째 다리 click은 막힐 수 있다. 이 경우 실제 Variational 포지션을 먼저 확인하고 한쪽 노출이 남았으면 수동 정리한다.
+
+Dashboard HTTPS:
+
+- `http://43.201.222.151/`처럼 IP로 접속하는 현재 구성은 TLS가 없어서 로그인 비밀번호와 JWT가 평문으로 지나간다. 공용 Wi-Fi나 신뢰할 수 없는 네트워크에서는 보안상 취약하다.
+- 제대로 운영하려면 도메인 또는 서브도메인을 EC2 IP로 연결하고, nginx + Let's Encrypt/Certbot으로 HTTPS 인증서를 발급한 뒤 HTTP를 HTTPS로 redirect해야 한다. 일반적인 Let's Encrypt 인증서는 bare IP 주소에는 발급되지 않는다.
+- 도메인을 붙이기 전 임시 운영에서는 Security Group에서 80 포트를 본인 고정 IP/VPN/Cloudflare Tunnel로 제한하는 편이 안전하다.
 
 남은 주의점:
 

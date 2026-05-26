@@ -7,6 +7,7 @@ import {
   getPnlHistory,
   startBot,
   stopBot,
+  setKillSwitch,
   createDashboardWs,
 } from "../api/client";
 import PNLChart from "../components/PNLChart";
@@ -44,16 +45,22 @@ export default function Dashboard() {
 
   // 초기 데이터 로드 + DB 기반 거래/PNL 주기 갱신
   useEffect(() => {
-    loadRuntimeData();
+    const initialId = setTimeout(loadRuntimeData, 0);
     const refreshId = setInterval(loadRuntimeData, 15000);
-    return () => clearInterval(refreshId);
+    return () => {
+      clearTimeout(initialId);
+      clearInterval(refreshId);
+    };
   }, [loadRuntimeData]);
 
   // WebSocket 실시간 데이터
   useEffect(() => {
     wsRef.current = createDashboardWs((msg) => {
       if (msg.type === "status") {
-        setStatus(msg.data);
+        setStatus((prev) => ({
+          ...msg.data,
+          kill_switch: msg.data.kill_switch ?? prev?.kill_switch,
+        }));
       }
       if (msg.type === "spread") {
         setSpreadData((prev) => [...prev.slice(-200), msg.data]);
@@ -84,10 +91,40 @@ export default function Dashboard() {
     setLoading(false);
   };
 
+  const handleKillSwitch = async () => {
+    const ok = window.confirm(
+      "Emergency stop will stop the bot and block Variational browser clicks. Continue?"
+    );
+    if (!ok) return;
+    setLoading(true);
+    try {
+      await setKillSwitch(true, "Dashboard emergency stop");
+      await loadRuntimeData();
+    } catch (err) {
+      alert(err.response?.data?.detail || "Emergency stop failed");
+    }
+    setLoading(false);
+  };
+
+  const handleClearKillSwitch = async () => {
+    const ok = window.confirm("Clear the emergency kill switch? The bot will not start automatically.");
+    if (!ok) return;
+    setLoading(true);
+    try {
+      await setKillSwitch(false, "Dashboard reset");
+      await loadRuntimeData();
+    } catch (err) {
+      alert(err.response?.data?.detail || "Reset failed");
+    }
+    setLoading(false);
+  };
+
   const handleLogout = () => {
     localStorage.removeItem("token");
     navigate("/login");
   };
+
+  const killSwitchActive = Boolean(status?.kill_switch?.active);
 
   return (
     <div style={styles.container}>
@@ -127,10 +164,10 @@ export default function Dashboard() {
               key={mode}
               style={{
                 ...styles.startBtn,
-                opacity: status?.running ? 0.5 : 1,
+                opacity: status?.running || killSwitchActive ? 0.5 : 1,
               }}
               onClick={() => handleStart(mode)}
-              disabled={loading || status?.running}
+              disabled={loading || status?.running || killSwitchActive}
             >
               Start {mode}
             </button>
@@ -142,8 +179,35 @@ export default function Dashboard() {
           >
             Stop
           </button>
+          <button
+            style={styles.killBtn}
+            onClick={handleKillSwitch}
+            disabled={loading || killSwitchActive}
+          >
+            Kill Switch
+          </button>
+          <button
+            style={{
+              ...styles.resetKillBtn,
+              opacity: killSwitchActive ? 1 : 0.45,
+            }}
+            onClick={handleClearKillSwitch}
+            disabled={loading || !killSwitchActive}
+          >
+            Reset Kill
+          </button>
         </div>
       </div>
+
+      {killSwitchActive && (
+        <div style={styles.killBanner}>
+          <strong>Emergency Kill Switch Active</strong>
+          <span>
+            Bot start is blocked and Variational browser clicks are refused.
+            {status?.kill_switch?.reason ? ` Reason: ${status.kill_switch.reason}` : ""}
+          </span>
+        </div>
+      )}
 
       {/* Stats */}
       <TradeLog summary={summary} />
@@ -243,6 +307,37 @@ const styles = {
     borderRadius: "8px",
     cursor: "pointer",
     fontWeight: "600",
+    fontSize: "13px",
+  },
+  killBtn: {
+    padding: "8px 16px",
+    background: "#991b1b",
+    color: "#fff",
+    border: "1px solid #ef4444",
+    borderRadius: "8px",
+    cursor: "pointer",
+    fontWeight: "700",
+    fontSize: "13px",
+  },
+  resetKillBtn: {
+    padding: "8px 16px",
+    background: "#27272a",
+    color: "#fca5a5",
+    border: "1px solid #7f1d1d",
+    borderRadius: "8px",
+    cursor: "pointer",
+    fontWeight: "600",
+    fontSize: "13px",
+  },
+  killBanner: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "4px",
+    padding: "12px 16px",
+    background: "#2a1216",
+    color: "#fecaca",
+    border: "1px solid #7f1d1d",
+    borderRadius: "8px",
     fontSize: "13px",
   },
   grid2: {

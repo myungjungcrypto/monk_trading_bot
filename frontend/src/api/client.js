@@ -47,6 +47,8 @@ export const startBot = (
   primary_exchange,
 });
 export const stopBot = () => api.post("/api/bot/stop");
+export const setKillSwitch = (active = true, reason = "") =>
+  api.post("/api/bot/kill-switch", { active, reason });
 export const testTelegram = () => api.post("/api/bot/test-telegram");
 
 // Config

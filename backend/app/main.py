@@ -10,9 +10,12 @@ FastAPI 엔트리포인트.
 """
 
 import asyncio
+import json
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
@@ -62,6 +65,49 @@ logger = logging.getLogger(__name__)
 _bot_engine = None
 _bot_task: Optional[asyncio.Task] = None
 _broadcast_task: Optional[asyncio.Task] = None
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _kill_switch_path() -> Path:
+    configured = os.getenv("VARIATIONAL_BROWSER_KILL_SWITCH_PATH")
+    if configured:
+        path = Path(configured).expanduser()
+        if path.is_absolute():
+            return path
+        return PROJECT_ROOT / path
+    return PROJECT_ROOT / "tools" / "variational-browser" / "runtime" / "kill_switch.json"
+
+
+def _read_kill_switch() -> Dict[str, Any]:
+    path = _kill_switch_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return {
+                "active": bool(data.get("active")),
+                "reason": data.get("reason") or "",
+                "updated_at": data.get("updated_at") or "",
+                "updated_by": data.get("updated_by") or "",
+                "path": str(path),
+            }
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        logger.warning("Failed to read kill switch file %s: %s", path, exc)
+    return {"active": False, "reason": "", "updated_at": "", "updated_by": "", "path": str(path)}
+
+
+def _write_kill_switch(*, active: bool, reason: str = "", updated_by: str = "") -> Dict[str, Any]:
+    path = _kill_switch_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "active": bool(active),
+        "reason": reason or ("Emergency kill switch" if active else "Kill switch cleared"),
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "updated_by": updated_by,
+    }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return {**payload, "path": str(path)}
 
 
 # ── Lifespan ─────────────────────────────────────────────
@@ -163,10 +209,19 @@ class BotStartRequest(BaseModel):
     primary_exchange: Optional[str] = None
 
 
+class KillSwitchRequest(BaseModel):
+    active: bool = True
+    reason: Optional[str] = None
+
+
 async def _auto_resume_open_trades(session_factory) -> None:
     """백엔드 재시작 시 열린 DB 거래가 있으면 봇을 자동 재시작합니다."""
     enabled = os.getenv("AUTO_RESUME_OPEN_TRADES", "true").lower() not in {"0", "false", "no"}
     if not enabled:
+        return
+
+    if _read_kill_switch().get("active"):
+        logger.warning("Auto-resume skipped because Variational kill switch is active")
         return
 
     global _bot_engine, _bot_task
@@ -406,8 +461,14 @@ def _build_exchanges(configs: Dict[str, Dict[str, Any]]):
 async def bot_status(_user: TokenData = Depends(get_current_user)):
     """봇 상태를 조회합니다."""
     if _bot_engine is None:
-        return {"running": False, "message": "Bot not initialized"}
-    return _bot_engine.get_status()
+        return {
+            "running": False,
+            "message": "Bot not initialized",
+            "kill_switch": _read_kill_switch(),
+        }
+    status = _bot_engine.get_status()
+    status["kill_switch"] = _read_kill_switch()
+    return status
 
 
 @app.post("/api/bot/start")
@@ -421,6 +482,10 @@ async def bot_start(
 
     if _bot_engine and _bot_engine.is_running:
         raise HTTPException(400, "Bot is already running")
+
+    kill_switch = _read_kill_switch()
+    if kill_switch.get("active"):
+        raise HTTPException(423, "Emergency kill switch is active. Clear it before starting the bot.")
 
     from backend.bot.engine import BotEngine
 
@@ -481,6 +546,33 @@ async def bot_stop(_user: TokenData = Depends(get_current_user)):
         _bot_task = None
 
     return {"status": "stopped"}
+
+
+@app.post("/api/bot/kill-switch")
+async def bot_kill_switch(
+    req: KillSwitchRequest,
+    user: TokenData = Depends(get_current_user),
+):
+    """Emergency switch for stopping the bot and blocking browser clicks."""
+    global _bot_engine, _bot_task
+
+    state = _write_kill_switch(
+        active=req.active,
+        reason=req.reason or "",
+        updated_by=user.username,
+    )
+
+    if req.active:
+        logger.warning("Emergency kill switch activated by %s: %s", user.username, state["reason"])
+        if _bot_engine and _bot_engine.is_running:
+            await _bot_engine.stop()
+        if _bot_task:
+            _bot_task.cancel()
+            _bot_task = None
+        return {"status": "activated", "kill_switch": state}
+
+    logger.info("Emergency kill switch cleared by %s", user.username)
+    return {"status": "cleared", "kill_switch": state}
 
 
 # ── 대시보드 WebSocket ───────────────────────────────────

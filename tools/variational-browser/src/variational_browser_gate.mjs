@@ -269,6 +269,7 @@ class VariationalBrowserGate {
     });
     this.context = null;
     this.page = null;
+    this.killSwitchLogged = false;
   }
 
   async start({ pollTelegram = true } = {}) {
@@ -477,6 +478,13 @@ class VariationalBrowserGate {
   }
 
   async watchRequests() {
+    console.log("[Variational Browser] request watcher started");
+    console.log(`dir: ${this.config.requestDir}`);
+    console.log(`dry_run: ${this.config.dryRun}`);
+    console.log(`auto_click_open: ${this.config.autoClickOpen}`);
+    console.log(`auto_click_open_max_size_usd: ${this.config.autoClickOpenMaxSizeUsd}`);
+    console.log(`auto_click_reduce_only: ${this.config.autoClickReduceOnly}`);
+
     await this.telegram.trySendMessage([
       "[Variational Browser] request watcher started",
       `dir: ${this.config.requestDir}`,
@@ -487,6 +495,17 @@ class VariationalBrowserGate {
     ].join("\n"), undefined, "request watcher startup status");
 
     while (true) {
+      const killSwitch = await this.readKillSwitch();
+      if (killSwitch.active) {
+        if (!this.killSwitchLogged) {
+          this.killSwitchLogged = true;
+          console.warn(`[Variational Browser] kill switch active; request processing paused: ${killSwitch.reason || ""}`);
+        }
+        await sleep(this.config.watchIntervalMs);
+        continue;
+      }
+      this.killSwitchLogged = false;
+
       const files = (await fs.promises.readdir(this.config.requestDir))
         .filter((name) => name.endsWith(".json"))
         .sort();
@@ -941,6 +960,37 @@ class VariationalBrowserGate {
     }
   }
 
+  async readKillSwitch() {
+    try {
+      const raw = await fs.promises.readFile(this.config.killSwitchPath, "utf8");
+      const data = JSON.parse(raw);
+      if (data && typeof data === "object") {
+        return {
+          active: Boolean(data.active),
+          reason: data.reason || "",
+          updatedAt: data.updated_at || "",
+          updatedBy: data.updated_by || "",
+        };
+      }
+    } catch (error) {
+      if (error.code !== "ENOENT") {
+        console.warn(`[Variational Browser] failed to read kill switch: ${error.message}`);
+      }
+    }
+    return { active: false, reason: "", updatedAt: "", updatedBy: "" };
+  }
+
+  async assertKillSwitchClear(context = "") {
+    const state = await this.readKillSwitch();
+    if (!state.active) return;
+
+    const suffix = context ? ` during ${context}` : "";
+    throw new Error(
+      `Emergency kill switch active${suffix}; refusing Variational browser click` +
+      (state.reason ? ` (${state.reason})` : ""),
+    );
+  }
+
   shouldAutoClickReduceOnly(request) {
     if (!this.config.autoClickReduceOnly) return false;
     if (request.autoClickReduceOnly === false) return false;
@@ -1340,6 +1390,8 @@ class VariationalBrowserGate {
   }
 
   async clickConfirm(request, confirmCandidates = []) {
+    await this.assertKillSwitchClear("confirm click");
+
     const selector = String(request.confirmSelector || this.config.confirmSelector || "auto").trim();
     if (selector && selector.toLowerCase() !== "auto") {
       if (isUnsafeConfirmSelector(selector)) {
@@ -1803,6 +1855,7 @@ function loadConfig() {
     profileDir: path.resolve(ROOT, env("VARIATIONAL_BROWSER_PROFILE_DIR", path.join("tools", "variational-browser", "runtime", "profile"))),
     requestDir: path.resolve(ROOT, env("VARIATIONAL_BROWSER_REQUEST_DIR", path.join("tools", "variational-browser", "runtime", "requests"))),
     screenshotDir: path.resolve(ROOT, env("VARIATIONAL_BROWSER_SCREENSHOT_DIR", path.join("tools", "variational-browser", "runtime", "screenshots"))),
+    killSwitchPath: path.resolve(ROOT, env("VARIATIONAL_BROWSER_KILL_SWITCH_PATH", path.join("tools", "variational-browser", "runtime", "kill_switch.json"))),
     confirmSelector: env("VARIATIONAL_BROWSER_CONFIRM_SELECTOR", "auto"),
     headless: envBool("VARIATIONAL_BROWSER_HEADLESS", true),
     dryRun: envBool("VARIATIONAL_BROWSER_DRY_RUN", true),
