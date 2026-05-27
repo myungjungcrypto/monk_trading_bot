@@ -913,24 +913,67 @@ class VariationalBrowserGate {
 
   async clickPreparedRequest(request, { screenshotPrefix, clickedCaption }) {
     const prepared = await this.prepareRequestPreview(request, `${screenshotPrefix}-before-click`);
+    const legSymbol = request.variationalOrder?.symbol || "";
+    const orderAction = String(request.variationalOrder?.action || "").toLowerCase();
+    let clickPhase = "prepared";
+    console.log(`[Variational Browser] prepared click: id=${request.id} leg=${legSymbol}`);
     await this.telegram.trySendPhoto(
       prepared.screenshotPath,
-      `[Variational Browser] prepared click\nid: ${request.id}\nleg: ${request.variationalOrder?.symbol || ""}`,
+      `[Variational Browser] prepared click\nid: ${request.id}\nleg: ${legSymbol}`,
       undefined,
       "prepared click screenshot",
     );
-    if (request.variationalOrder?.reduceOnly === true) {
-      await this.assertReduceOnlyChecked("before confirm click");
+
+    try {
+      if (request.variationalOrder?.reduceOnly === true) {
+        clickPhase = "pre-confirm reduce-only guard";
+        try {
+          await this.assertReduceOnlyChecked("before confirm click");
+        } catch (error) {
+          if (orderAction === "close" && await this.hasNoOpenPositionForSymbol(legSymbol)) {
+            throw noPositionForReduceOnlyError(legSymbol, error.message);
+          }
+          throw error;
+        }
+      }
+
+      clickPhase = "confirm click";
+      const clickedTarget = await this.clickConfirm(request, prepared.confirmCandidates);
+      console.log(`[Variational Browser] click submitted: id=${request.id} leg=${legSymbol} target=${clickedTarget}`);
+
+      clickPhase = "after-click wait";
+      await this.page.waitForTimeout(Number(request.afterClickDelayMs ?? this.config.afterClickDelayMs));
+      const afterPath = await this.captureScreenshot(`${screenshotPrefix}-after`);
+      await this.telegram.trySendPhoto(
+        afterPath,
+        `[Variational Browser] ${clickedCaption}\nid: ${request.id}\nleg: ${legSymbol}`,
+        undefined,
+        "clicked screenshot",
+      );
+    } catch (error) {
+      const failurePath = await this.captureScreenshot(`${screenshotPrefix}-${clickPhase.replace(/\W+/g, "-")}-failed`).catch(() => "");
+      const message = [
+        "[Variational Browser] prepared click failed",
+        `id: ${request.id}`,
+        `leg: ${legSymbol}`,
+        `phase: ${clickPhase}`,
+        `error: ${error.message}`,
+      ].join("\n");
+      if (failurePath) {
+        await this.telegram.trySendPhoto(
+          failurePath,
+          message.slice(0, 1024),
+          undefined,
+          "prepared click failure screenshot",
+        );
+      } else {
+        await this.telegram.trySendMessage(message, undefined, "prepared click failure notice");
+      }
+      if (error?.code === "NO_POSITION_FOR_REDUCE_ONLY") {
+        throw error;
+      }
+      throw new Error(`${clickPhase}: ${error.message}`);
     }
-    await this.clickConfirm(request, prepared.confirmCandidates);
-    await this.page.waitForTimeout(Number(request.afterClickDelayMs ?? this.config.afterClickDelayMs));
-    const afterPath = await this.captureScreenshot(`${screenshotPrefix}-after`);
-    await this.telegram.trySendPhoto(
-      afterPath,
-      `[Variational Browser] ${clickedCaption}\nid: ${request.id}\nleg: ${request.variationalOrder?.symbol || ""}`,
-      undefined,
-      "clicked screenshot",
-    );
   }
 
   async rollbackClickedOpenLegs(clickedLegs, batchId = "") {
