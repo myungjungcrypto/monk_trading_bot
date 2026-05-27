@@ -267,9 +267,11 @@ class VariationalBrowserGate {
       timeoutMs: config.approvalTimeoutMs,
       bestEffortTimeoutMs: config.telegramBestEffortTimeoutMs,
     });
+    this.browser = null;
     this.context = null;
     this.page = null;
     this.killSwitchLogged = false;
+    this.connectedOverCdp = false;
   }
 
   async start({ pollTelegram = true } = {}) {
@@ -280,26 +282,35 @@ class VariationalBrowserGate {
     await ensureDir(this.config.screenshotDir);
     await ensureDir(this.config.requestDir);
 
-    const launchOptions = {
-      headless: this.config.headless,
-      viewport: this.config.viewport,
-      args: ["--disable-dev-shm-usage", "--no-sandbox", ...this.config.extraBrowserArgs],
-      permissions: ["clipboard-read", "clipboard-write"],
-    };
-    if (this.config.browserExecutablePath) {
-      launchOptions.executablePath = this.config.browserExecutablePath;
-    } else if (this.config.browserChannel) {
-      launchOptions.channel = this.config.browserChannel;
-    }
+    if (this.config.browserCdpEndpoint) {
+      this.browser = await chromium.connectOverCDP(this.config.browserCdpEndpoint);
+      this.connectedOverCdp = true;
+      this.context = this.browser.contexts()[0];
+      if (!this.context) {
+        throw new Error(`No browser context found after connecting to ${this.config.browserCdpEndpoint}`);
+      }
+    } else {
+      const launchOptions = {
+        headless: this.config.headless,
+        viewport: this.config.viewport,
+        args: ["--disable-dev-shm-usage", "--no-sandbox", ...this.config.extraBrowserArgs],
+        permissions: ["clipboard-read", "clipboard-write"],
+      };
+      if (this.config.browserExecutablePath) {
+        launchOptions.executablePath = this.config.browserExecutablePath;
+      } else if (this.config.browserChannel) {
+        launchOptions.channel = this.config.browserChannel;
+      }
 
-    this.context = await chromium.launchPersistentContext(this.config.profileDir, launchOptions);
+      this.context = await chromium.launchPersistentContext(this.config.profileDir, launchOptions);
+    }
     this.page = this.context.pages()[0] || await this.context.newPage();
     this.page.setDefaultTimeout(this.config.actionTimeoutMs);
   }
 
   async stop() {
     this.telegram.stop();
-    if (this.context) {
+    if (this.context && !this.connectedOverCdp) {
       await this.context.close();
     }
   }
@@ -313,6 +324,7 @@ class VariationalBrowserGate {
       `profile: ${this.config.profileDir}`,
       `browser_executable_path: ${this.config.browserExecutablePath || ""}`,
       `browser_channel: ${this.config.browserChannel || ""}`,
+      `browser_cdp_endpoint: ${this.config.browserCdpEndpoint || ""}`,
     ].join("\n"));
     await new Promise(() => {});
   }
@@ -2144,6 +2156,7 @@ function loadConfig() {
     killSwitchPath: path.resolve(ROOT, env("VARIATIONAL_BROWSER_KILL_SWITCH_PATH", path.join("tools", "variational-browser", "runtime", "kill_switch.json"))),
     confirmSelector: env("VARIATIONAL_BROWSER_CONFIRM_SELECTOR", "auto"),
     headless: envBool("VARIATIONAL_BROWSER_HEADLESS", true),
+    browserCdpEndpoint: env("VARIATIONAL_BROWSER_CDP_ENDPOINT", ""),
     browserExecutablePath: env("VARIATIONAL_BROWSER_EXECUTABLE_PATH", ""),
     browserChannel: env("VARIATIONAL_BROWSER_CHANNEL", ""),
     extraBrowserArgs: envList("VARIATIONAL_BROWSER_EXTRA_ARGS", []),

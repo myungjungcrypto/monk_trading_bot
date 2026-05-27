@@ -140,6 +140,30 @@ VARIATIONAL_BROWSER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
 ```
 
 This makes the automation use the same system Chrome binary for later runs.
+If Cloudflare still challenges Playwright-launched Chrome, keep the human-opened
+Chrome running with a remote debugging port and attach to it instead of letting
+Playwright launch a new browser:
+
+```bash
+google-chrome-stable \
+  --no-sandbox \
+  --disable-gpu \
+  --remote-debugging-address=127.0.0.1 \
+  --remote-debugging-port=9222 \
+  --user-data-dir=$HOME/monk_trading_bot/tools/variational-browser/runtime/profile \
+  https://omni.variational.io
+```
+
+Then in `tools/variational-browser/.env`:
+
+```env
+VARIATIONAL_BROWSER_CDP_ENDPOINT=http://127.0.0.1:9222
+VARIATIONAL_BROWSER_HEADLESS=false
+```
+
+With this mode, `--status`, `--connect-wallet`, and the daemon operate against
+the already-running Chrome. One-shot commands disconnect from Chrome on exit
+instead of closing the browser.
 
 Keep `tools/variational-wallet` running while doing this, then approve the
 WalletConnect `SIGN REQUEST` in Telegram.
