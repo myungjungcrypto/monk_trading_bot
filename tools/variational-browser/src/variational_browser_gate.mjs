@@ -280,12 +280,19 @@ class VariationalBrowserGate {
     await ensureDir(this.config.screenshotDir);
     await ensureDir(this.config.requestDir);
 
-    this.context = await chromium.launchPersistentContext(this.config.profileDir, {
+    const launchOptions = {
       headless: this.config.headless,
       viewport: this.config.viewport,
-      args: ["--disable-dev-shm-usage", "--no-sandbox"],
+      args: ["--disable-dev-shm-usage", "--no-sandbox", ...this.config.extraBrowserArgs],
       permissions: ["clipboard-read", "clipboard-write"],
-    });
+    };
+    if (this.config.browserExecutablePath) {
+      launchOptions.executablePath = this.config.browserExecutablePath;
+    } else if (this.config.browserChannel) {
+      launchOptions.channel = this.config.browserChannel;
+    }
+
+    this.context = await chromium.launchPersistentContext(this.config.profileDir, launchOptions);
     this.page = this.context.pages()[0] || await this.context.newPage();
     this.page.setDefaultTimeout(this.config.actionTimeoutMs);
   }
@@ -304,6 +311,8 @@ class VariationalBrowserGate {
       `url: ${url}`,
       `headless: ${this.config.headless}`,
       `profile: ${this.config.profileDir}`,
+      `browser_executable_path: ${this.config.browserExecutablePath || ""}`,
+      `browser_channel: ${this.config.browserChannel || ""}`,
     ].join("\n"));
     await new Promise(() => {});
   }
@@ -2135,6 +2144,9 @@ function loadConfig() {
     killSwitchPath: path.resolve(ROOT, env("VARIATIONAL_BROWSER_KILL_SWITCH_PATH", path.join("tools", "variational-browser", "runtime", "kill_switch.json"))),
     confirmSelector: env("VARIATIONAL_BROWSER_CONFIRM_SELECTOR", "auto"),
     headless: envBool("VARIATIONAL_BROWSER_HEADLESS", true),
+    browserExecutablePath: env("VARIATIONAL_BROWSER_EXECUTABLE_PATH", ""),
+    browserChannel: env("VARIATIONAL_BROWSER_CHANNEL", ""),
+    extraBrowserArgs: envList("VARIATIONAL_BROWSER_EXTRA_ARGS", []),
     dryRun: envBool("VARIATIONAL_BROWSER_DRY_RUN", true),
     autoClickReduceOnly: envBool("VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY", true),
     autoClickOpen: envBool("VARIATIONAL_BROWSER_AUTO_CLICK_OPEN", false),

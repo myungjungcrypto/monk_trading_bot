@@ -119,6 +119,28 @@ The reset keeps cookies so a valid Cloudflare clearance is not intentionally
 discarded. If the human verification challenge is still visible, complete it
 manually in a visible browser/noVNC session before reconnecting.
 
+For stubborn Cloudflare failures, use a normal system Chrome with the same
+persistent profile instead of Playwright's bundled browser:
+
+```bash
+sudo dnf install -y https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm
+pm2 stop variational-browser
+pkill -f 'chrome|chromium|playwright' || true
+
+google-chrome-stable \
+  --no-sandbox \
+  --user-data-dir=$HOME/monk_trading_bot/tools/variational-browser/runtime/profile \
+  https://omni.variational.io
+```
+
+After manually passing the challenge, set:
+
+```env
+VARIATIONAL_BROWSER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
+```
+
+This makes the automation use the same system Chrome binary for later runs.
+
 Keep `tools/variational-wallet` running while doing this, then approve the
 WalletConnect `SIGN REQUEST` in Telegram.
 
