@@ -740,16 +740,28 @@ class VariationalBrowserGate {
     if (autoReduceOnly) {
       const result = await this.clickAutoReduceOnlyBatch(legs, request);
       if (result.failures.length) {
+        const noPositionFailures = result.failures.filter(({ error }) => error?.code === "NO_POSITION_FOR_REDUCE_ONLY");
+        const blockingFailures = result.failures.filter(({ error }) => error?.code !== "NO_POSITION_FOR_REDUCE_ONLY");
+        if (!blockingFailures.length) {
+          await this.telegram.trySendMessage([
+            "[Variational Browser] batch reduce-only found no open position",
+            `id: ${request.id}`,
+            `clicked_legs: ${result.successes.map((leg) => leg.variationalOrder?.symbol).join(",") || "none"}`,
+            "no_position_legs:",
+            ...noPositionFailures.map(({ leg }) => `- ${leg.variationalOrder?.symbol || "leg"}`),
+          ].join("\n"), undefined, "batch reduce-only no-position notice");
+          return { status: result.successes.length ? "clicked" : "external_closed" };
+        }
         await this.telegram.trySendMessage([
           "[Variational Browser] batch reduce-only partially failed",
           `id: ${request.id}`,
           `clicked_legs: ${result.successes.map((leg) => leg.variationalOrder?.symbol).join(",") || "none"}`,
           "failed_legs:",
-          ...result.failures.map(({ leg, error }) => `- ${leg.variationalOrder?.symbol || "leg"}: ${error.message}`),
+          ...blockingFailures.map(({ leg, error }) => `- ${leg.variationalOrder?.symbol || "leg"}: ${error.message}`),
         ].join("\n"), undefined, "batch reduce-only partial failure notice");
         return {
           status: result.successes.length ? "partial_failed" : "failed",
-          reason: result.failures.map(({ leg, error }) => `${leg.variationalOrder?.symbol || "leg"}=${error.message}`).join("; "),
+          reason: blockingFailures.map(({ leg, error }) => `${leg.variationalOrder?.symbol || "leg"}=${error.message}`).join("; "),
         };
       }
 
@@ -797,6 +809,7 @@ class VariationalBrowserGate {
     const successes = [];
     let pending = [...legs];
     let failures = [];
+    const terminalFailures = [];
 
     for (let attempt = 1; attempt <= attempts && pending.length; attempt += 1) {
       const nextPending = [];
@@ -818,8 +831,29 @@ class VariationalBrowserGate {
           });
           successes.push(leg);
         } catch (error) {
-          failures.push({ leg, error });
-          nextPending.push(leg);
+          if (error?.code === "NO_POSITION_FOR_REDUCE_ONLY") {
+            terminalFailures.push({ leg, error });
+          } else {
+            failures.push({ leg, error });
+            nextPending.push(leg);
+          }
+          const failurePath = await this.captureScreenshot(
+            `${request.id || "batch"}-${leg.variationalOrder?.symbol || "leg"}-attempt${attempt}-failed`,
+          ).catch(() => "");
+          if (failurePath) {
+            await this.telegram.trySendPhoto(
+              failurePath,
+              [
+                "[Variational Browser] reduce-only leg failed screenshot",
+                `batch_id: ${request.id || ""}`,
+                `attempt: ${attempt}/${attempts}`,
+                `leg: ${leg.variationalOrder?.symbol || "leg"}`,
+                `error: ${error.message}`,
+              ].join("\n").slice(0, 1024),
+              undefined,
+              "reduce-only leg failure screenshot",
+            );
+          }
           await this.telegram.trySendMessage([
             "[Variational Browser] reduce-only leg failed",
             `batch_id: ${request.id || ""}`,
@@ -836,7 +870,7 @@ class VariationalBrowserGate {
       }
     }
 
-    return { successes, failures };
+    return { successes, failures: [...terminalFailures, ...failures] };
   }
 
   async prepareRequestPreview(request, screenshotId) {
@@ -1051,6 +1085,7 @@ class VariationalBrowserGate {
     const quantity = String(order.quantity ?? "").trim();
     const orderType = String(order.orderType || "market").toLowerCase();
     const reduceOnly = Boolean(order.reduceOnly);
+    const action = String(order.action || "").toLowerCase();
 
     if (!["BTC", "ETH"].includes(symbol)) {
       throw new Error(`unsupported Variational order symbol: ${order.symbol}`);
@@ -1082,16 +1117,30 @@ class VariationalBrowserGate {
     let reduceOnlySelector = "";
     if (reduceOnly) {
       console.log("[Variational Browser] enabling reduce only...");
-      reduceOnlySelector = await this.enableReduceOnly();
-      await this.page.waitForTimeout(300);
-      await this.assertReduceOnlyChecked("after enable");
+      try {
+        reduceOnlySelector = await this.enableReduceOnly();
+        await this.page.waitForTimeout(300);
+        await this.assertReduceOnlyChecked("after enable");
+      } catch (error) {
+        if (action === "close" && await this.hasNoOpenPositionForSymbol(symbol)) {
+          throw noPositionForReduceOnlyError(symbol, error.message);
+        }
+        throw error;
+      }
     }
 
     console.log("[Variational Browser] filling size input...");
     const filledSelector = await this.fillOrderSize(quantity);
     await this.page.waitForTimeout(this.config.orderSetupDelayMs);
     if (reduceOnly) {
-      await this.assertReduceOnlyChecked("after size input");
+      try {
+        await this.assertReduceOnlyChecked("after size input");
+      } catch (error) {
+        if (action === "close" && await this.hasNoOpenPositionForSymbol(symbol)) {
+          throw noPositionForReduceOnlyError(symbol, error.message);
+        }
+        throw error;
+      }
     }
     console.log(`[Variational Browser] order panel set: side_selector=${clickedSide} reduce_only_selector=${reduceOnlySelector || "none"} size_selector=${filledSelector}`);
 
@@ -1135,6 +1184,29 @@ class VariationalBrowserGate {
     console.log(`[Variational Browser] reduce only selector not found; clicking fallback point x=${x} y=${y}`);
     await this.page.mouse.click(x, y);
     return `fallback:${point.x},${point.y}`;
+  }
+
+  async hasNoOpenPositionForSymbol(symbol) {
+    return this.page.evaluate((asset) => {
+      const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+      const text = document.body?.innerText || "";
+      const lines = text.split(/\n+/).map(normalize).filter(Boolean);
+      if (/Positions\s*\([1-9]\d*\)/i.test(text)) return false;
+      if (lines.some((line) => /^No positions$/i.test(line))) return true;
+
+      const symbolRe = new RegExp(`\\b${asset}\\s*[-/]?\\s*PERP\\b`, "i");
+      if (symbolRe.test(text)) return false;
+
+      const currentIdx = lines.findIndex((line) => /^Current Position$/i.test(line));
+      if (currentIdx >= 0) {
+        const value = lines[currentIdx + 1] || "";
+        if (/^-+$/.test(value)) return true;
+        if (new RegExp(`^0(?:\\.0+)?\\s*${asset}?$`, "i").test(value)) return true;
+        if (/[1-9]/.test(value)) return false;
+      }
+
+      return false;
+    }, symbol).catch(() => false);
   }
 
   async assertReduceOnlyChecked(context = "") {
@@ -2028,6 +2100,13 @@ function randomId() {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function noPositionForReduceOnlyError(symbol, cause = "") {
+  const suffix = cause ? `; reduce-only unavailable: ${cause}` : "";
+  const error = new Error(`No open ${symbol} position found while preparing reduce-only close${suffix}`);
+  error.code = "NO_POSITION_FOR_REDUCE_ONLY";
+  return error;
 }
 
 async function run() {

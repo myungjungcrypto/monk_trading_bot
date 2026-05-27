@@ -41,6 +41,8 @@ from backend.bot.variational.browser_requests import (
     VariationalBrowserRequestBatch,
     VariationalBrowserRequestBridge,
     completions_all_clicked,
+    completions_close_resolved,
+    completions_external_closed,
     format_completions,
     request_quantity,
 )
@@ -900,7 +902,25 @@ class BotEngine:
                             reason=reason.value,
                         )
                         await self._notify_variational_requests("close", close_batch)
-                        if not await self._await_variational_browser_execution("close", close_batch):
+                        execution_status, _ = await self._wait_variational_browser_execution_result("close", close_batch)
+                        if execution_status == "external_closed":
+                            db_id = self._trade_db_ids.get(trade_id)
+                            if db_id is None:
+                                logger.warning(
+                                    "Variational close resolved externally but DB trade id is unknown for %s",
+                                    trade_id,
+                                )
+                                self._exit_retry_after[trade_id] = time.time() + self._exit_retry_cooldown_sec
+                                return
+                            result = await self.reconcile_external_close(
+                                db_trade_id=db_id,
+                                reason="EXTERNAL_MANUAL_CLOSE",
+                                pnl_usd=0.0,
+                            )
+                            if not result.get("closed"):
+                                self._exit_retry_after[trade_id] = time.time() + self._exit_retry_cooldown_sec
+                            return
+                        if execution_status != "clicked":
                             self._exit_retry_after[trade_id] = time.time() + self._exit_retry_cooldown_sec
                             return
                     except Exception as e:
@@ -990,8 +1010,16 @@ class BotEngine:
         label: str,
         batch: VariationalBrowserRequestBatch,
     ) -> bool:
+        status, _ = await self._wait_variational_browser_execution_result(label, batch)
+        return status == "clicked"
+
+    async def _wait_variational_browser_execution_result(
+        self,
+        label: str,
+        batch: VariationalBrowserRequestBatch,
+    ) -> tuple[str, str]:
         if self.variational_bridge is None:
-            return True
+            return "clicked", ""
 
         completions = await self.variational_bridge.wait_for_batch_completion(batch)
         summary = format_completions(completions)
@@ -1004,7 +1032,21 @@ class BotEngine:
                         summary,
                     ])
                 )
-            return True
+            return "clicked", summary
+
+        if label == "close" and completions_close_resolved(completions):
+            logger.warning("Variational Browser close resolved by external flat state:\n%s", summary)
+            if self.telegram:
+                await self.telegram.status(
+                    "\n".join([
+                        "Variational Browser close resolved externally",
+                        summary,
+                        "No live close click was needed because Variational appeared flat.",
+                    ])
+                )
+            if completions_external_closed(completions):
+                return "external_closed", summary
+            return "clicked", summary
 
         logger.warning("Variational Browser %s not executed:\n%s", label, summary)
         if self.telegram:
@@ -1015,7 +1057,7 @@ class BotEngine:
                     "Virtual/DB position was not changed.",
                 ]),
             )
-        return False
+        return "failed", summary
 
     # ── 리스크 액션 처리 ─────────────────────────────────────
 

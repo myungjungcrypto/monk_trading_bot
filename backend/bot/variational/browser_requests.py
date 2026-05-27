@@ -413,6 +413,16 @@ def completions_all_clicked(completions: List[VariationalBrowserRequestCompletio
     return bool(completions) and all(completion.status == "clicked" for completion in completions)
 
 
+def completions_close_resolved(completions: List[VariationalBrowserRequestCompletion]) -> bool:
+    """Close batches are resolved by a click or by discovering the venue is already flat."""
+    resolved_statuses = {"clicked", "external_closed"}
+    return bool(completions) and all(completion.status in resolved_statuses for completion in completions)
+
+
+def completions_external_closed(completions: List[VariationalBrowserRequestCompletion]) -> bool:
+    return bool(completions) and any(completion.status == "external_closed" for completion in completions)
+
+
 def format_completions(completions: List[VariationalBrowserRequestCompletion]) -> str:
     return "\n".join(
         f"{completion.path.name}: {completion.status}"
