@@ -540,22 +540,27 @@ class VariationalBrowserGate {
     await this.page.waitForTimeout(this.config.previewDelayMs);
     const walletState = await this.assessWalletState();
     const screenshotPath = await this.captureScreenshot(`status-${Date.now()}`);
-    await this.telegram.sendPhoto(
+    const statusText = [
+      "[Variational Browser] WALLET STATUS",
+      `url: ${this.page.url()}`,
+      `stage: ${walletState.stage}`,
+      `ready: ${walletState.stage === "ready"}`,
+      `ready_visible: ${walletState.readyVisible}`,
+      `ready_text_visible: ${walletState.readyTextVisible}`,
+      `ready_order_panel_visible: ${walletState.readyOrderPanelVisible}`,
+      `connect_wallet_visible: ${walletState.connectWalletVisible}`,
+      `authenticate_visible: ${walletState.authenticateVisible}`,
+      `wallet_prompt_visible: ${walletState.walletPromptVisible}`,
+      `wallet_lost_visible: ${walletState.walletLostVisible}`,
+      `human_challenge_visible: ${walletState.humanChallengeVisible}`,
+      `screenshot: ${screenshotPath}`,
+    ].join("\n");
+    console.log(statusText);
+    await this.telegram.trySendPhoto(
       screenshotPath,
-      [
-        "[Variational Browser] WALLET STATUS",
-        `url: ${this.page.url()}`,
-        `stage: ${walletState.stage}`,
-        `ready: ${walletState.stage === "ready"}`,
-        `ready_visible: ${walletState.readyVisible}`,
-        `ready_text_visible: ${walletState.readyTextVisible}`,
-        `ready_order_panel_visible: ${walletState.readyOrderPanelVisible}`,
-        `connect_wallet_visible: ${walletState.connectWalletVisible}`,
-        `authenticate_visible: ${walletState.authenticateVisible}`,
-        `wallet_prompt_visible: ${walletState.walletPromptVisible}`,
-        `wallet_lost_visible: ${walletState.walletLostVisible}`,
-        `human_challenge_visible: ${walletState.humanChallengeVisible}`,
-      ].join("\n"),
+      statusText,
+      undefined,
+      "wallet status screenshot",
     );
     return { status: walletState.stage, screenshotPath };
   }
