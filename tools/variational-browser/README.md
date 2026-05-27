@@ -73,9 +73,10 @@ disconnected while the browser profile hydrates, the tool waits
 `VARIATIONAL_BROWSER_STATE_SETTLE_SEC` before opening a new WalletConnect modal.
 
 If it finds a URI, it writes it to
-`tools/variational-browser/runtime/walletconnect_uri.txt` and sends the next
-command to Telegram. Keep this browser command running, open a second SSH
-terminal, and pair it with:
+`tools/variational-browser/runtime/walletconnect_uri.txt`. A PM2-running
+`tools/variational-wallet` process watches that file by default and pairs with
+fresh `wc:` URIs automatically. If the wallet daemon is not running, pair it
+manually with:
 
 ```bash
 cd ~/monk_trading_bot/tools/variational-wallet

@@ -60,6 +60,11 @@ function requireEnv(name) {
   return value;
 }
 
+function resolveRootPath(value) {
+  if (!value) return "";
+  return path.isAbsolute(value) ? value : path.resolve(ROOT, value);
+}
+
 class TelegramApprovalClient {
   constructor({ token, chatId, allowedUserIds, timeoutMs, httpTimeoutMs, httpRetries }) {
     this.token = token;
@@ -230,6 +235,8 @@ class VariationalWalletBot {
       httpRetries: config.telegramHttpRetries,
     });
     this.walletKit = null;
+    this.seenPairingUris = new Set();
+    this.pairingUriFileTimer = null;
   }
 
   async start(pairingUri) {
@@ -251,25 +258,93 @@ class VariationalWalletBot {
     });
 
     this.registerHandlers(address);
-    await this.telegram.sendMessage([
+    const startLines = [
       "[Variational Wallet] started",
       `address: ${address}`,
       `chains: ${this.config.chains.join(", ")}`,
       `dry_run: ${this.config.dryRun}`,
       `send_tx_enabled: ${this.config.allowSendTransaction}`,
-    ].join("\n"));
+    ];
+    if (this.config.pairingUriFileEnabled && this.config.pairingUriFile) {
+      startLines.push(`pairing_uri_file: ${this.config.pairingUriFile}`);
+      startLines.push(`pairing_uri_poll_sec: ${Math.round(this.config.pairingUriPollMs / 1000)}`);
+    }
+    await this.telegram.sendMessage(startLines.join("\n"));
 
     if (pairingUri) {
+      this.rememberPairingUri(pairingUri);
       await this.pair(pairingUri);
     }
+    this.startPairingUriFileWatcher();
 
     console.log("[wallet] running. Press Ctrl+C to stop.");
     await new Promise(() => {});
   }
 
-  async pair(uri) {
-    console.log("[wallet] pairing...");
-    await this.walletKit.pair({ uri });
+  async pair(uri, { source = "manual" } = {}) {
+    const normalized = String(uri || "").trim();
+    if (!normalized.startsWith("wc:")) {
+      throw new Error(`invalid WalletConnect URI from ${source}`);
+    }
+    console.log(`[wallet] pairing (${source})...`);
+    await this.walletKit.pair({ uri: normalized });
+  }
+
+  rememberPairingUri(uri) {
+    const normalized = String(uri || "").trim();
+    if (!normalized) return;
+    this.seenPairingUris.add(normalized);
+    if (this.seenPairingUris.size > 20) {
+      const [oldest] = this.seenPairingUris;
+      this.seenPairingUris.delete(oldest);
+    }
+  }
+
+  startPairingUriFileWatcher() {
+    if (!this.config.pairingUriFileEnabled || !this.config.pairingUriFile || this.pairingUriFileTimer) {
+      return;
+    }
+
+    let polling = false;
+    const poll = async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const raw = await fs.promises.readFile(this.config.pairingUriFile, "utf8").catch((error) => {
+          if (error.code === "ENOENT") return "";
+          throw error;
+        });
+        const uri = raw.trim();
+        if (!uri || !uri.startsWith("wc:") || this.seenPairingUris.has(uri)) {
+          return;
+        }
+
+        this.rememberPairingUri(uri);
+        const message = [
+          "[Variational Wallet] pairing URI detected",
+          `file: ${this.config.pairingUriFile}`,
+        ].join("\n");
+        await this.telegram.sendMessage(message).catch((error) => {
+          console.warn("[telegram] pairing URI notice failed:", error.message);
+        });
+        await this.pair(uri, { source: "uri_file" });
+      } catch (error) {
+        console.warn("[wallet] pairing URI file failed:", error.message);
+        await this.telegram.sendMessage([
+          "[Variational Wallet] pairing URI failed",
+          `file: ${this.config.pairingUriFile}`,
+          `reason: ${error.message}`,
+        ].join("\n")).catch(() => {});
+      } finally {
+        polling = false;
+      }
+    };
+
+    this.pairingUriFileTimer = setInterval(() => {
+      poll().catch((error) => console.warn("[wallet] pairing URI poll failed:", error.message));
+    }, this.config.pairingUriPollMs);
+    this.pairingUriFileTimer.unref?.();
+    poll().catch((error) => console.warn("[wallet] pairing URI initial poll failed:", error.message));
   }
 
   registerHandlers(address) {
@@ -542,8 +617,9 @@ function sleep(ms) {
 function loadConfig() {
   const privateKeyFile = env("VARIATIONAL_WALLET_PRIVATE_KEY_FILE");
   const privateKey = privateKeyFile
-    ? fs.readFileSync(path.resolve(ROOT, privateKeyFile), "utf8").trim()
+    ? fs.readFileSync(resolveRootPath(privateKeyFile), "utf8").trim()
     : requireEnv("VARIATIONAL_WALLET_PRIVATE_KEY");
+  const pairingUriPollSec = Number(env("VARIATIONAL_WC_PAIRING_URI_POLL_SEC", "2"));
 
   return {
     projectId: requireEnv("WALLETCONNECT_PROJECT_ID"),
@@ -563,6 +639,12 @@ function loadConfig() {
     allowSendTransaction: envBool("VARIATIONAL_WC_ALLOW_SEND_TRANSACTION", false),
     maxNativeValueWei: BigInt(env("VARIATIONAL_WC_MAX_NATIVE_VALUE_WEI", "0")),
     storagePrefix: env("VARIATIONAL_WC_STORAGE_PREFIX", "monk-variational-wallet"),
+    pairingUriFileEnabled: envBool("VARIATIONAL_WC_PAIRING_URI_FILE_ENABLED", true),
+    pairingUriFile: resolveRootPath(env(
+      "VARIATIONAL_WC_PAIRING_URI_FILE",
+      path.join("tools", "variational-browser", "runtime", "walletconnect_uri.txt"),
+    )),
+    pairingUriPollMs: Math.max(500, (Number.isFinite(pairingUriPollSec) ? pairingUriPollSec : 2) * 1000),
   };
 }
 

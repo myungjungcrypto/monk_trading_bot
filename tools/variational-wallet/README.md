@@ -50,6 +50,17 @@ Or prompt for the URI:
 npm start -- --pair
 ```
 
+When the browser tool extracts a URI, it also writes
+`tools/variational-browser/runtime/walletconnect_uri.txt`. A long-running wallet
+process watches that file by default and pairs with any fresh `wc:` URI it sees,
+so the normal PM2 flow does not require manually pasting `--uri`:
+
+```env
+VARIATIONAL_WC_PAIRING_URI_FILE_ENABLED=true
+VARIATIONAL_WC_PAIRING_URI_FILE=tools/variational-browser/runtime/walletconnect_uri.txt
+VARIATIONAL_WC_PAIRING_URI_POLL_SEC=2
+```
+
 Keep this process running until the browser confirms the wallet is connected.
 Variational may send a second `SIGN REQUEST` with an `authenticate` or login
 message after the initial `SESSION REQUEST`. Approve that second request too.
@@ -61,12 +72,14 @@ after approval, so Variational will fall back to `Connect Wallet`.
 After a successful manual pairing test:
 
 ```bash
-pm2 start npm --name variational-wallet --prefix ~/monk_trading_bot/tools/variational-wallet -- start
+cd ~/monk_trading_bot/tools/variational-wallet
+pm2 start npm --name variational-wallet -- start
 pm2 save
 ```
 
 Keep the process running to preserve the WalletConnect session. If Variational
-disconnects the session, run with `--pair` again.
+disconnects the session, run the browser `--connect-wallet` flow again; the
+wallet daemon will detect the new URI file and send the session approval request.
 
 ## Live Signing
 
