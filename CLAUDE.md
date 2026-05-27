@@ -833,6 +833,8 @@ VARIATIONAL_BROWSER_COMPLETION_POLL_SEC=1
 VARIATIONAL_BROWSER_RECONCILE_WINDOW_SEC=600
 VARIATIONAL_BROWSER_KILL_SWITCH_PATH=tools/variational-browser/runtime/kill_switch.json
 VARIATIONAL_BROWSER_TELEGRAM_BEST_EFFORT_TIMEOUT_SEC=3
+VARIATIONAL_BROWSER_REQUEST_AUTO_AUTHENTICATE=true
+VARIATIONAL_BROWSER_ENTRY_RETRY_COOLDOWN_SEC=120
 VARIATIONAL_BROWSER_AUTO_CLICK_OPEN=false
 VARIATIONAL_BROWSER_AUTO_CLICK_OPEN_MAX_SIZE_USD=100
 VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY=true
@@ -885,6 +887,7 @@ Emergency Kill Switch:
 - Kill switch를 누르는 순간 이미 첫 다리 click이 끝난 상태라면 두 번째 다리 click은 막힐 수 있다. 이 경우 실제 Variational 포지션을 먼저 확인하고 한쪽 노출이 남았으면 수동 정리한다.
 - 실제 Variational 포지션을 사용자가 웹에서 이미 수동 청산했는데 대시보드/DB에만 `OPEN`이 남으면 `Clear External` 버튼 또는 `/api/bot/reconcile-external-close`를 사용한다. 이 경로는 새 주문을 내지 않고 `variational_browser` DB trade와 BotEngine 메모리 포지션만 `EXTERNAL_MANUAL_CLOSE`로 닫는다. 실제 포지션이 없는 것을 먼저 확인한 뒤에만 사용한다.
 - 자동 close 중 Reduce Only를 켤 수 없고 화면상 실제 포지션도 없으면 browser daemon은 이를 실패 재시도가 아니라 `external_closed`로 분류한다. Backend는 이 상태를 받아 같은 `EXTERNAL_MANUAL_CLOSE` reconcile 경로를 자동 실행하므로, 이미 수동 청산된 포지션 때문에 close request가 반복 생성되는 루프를 막는다. Reduce Only 설정 실패 시에는 원인 분석용 실패 screenshot도 Telegram으로 보낸다.
+- request 처리 중 Variational 화면이 `auth_required` 상태이면 browser daemon은 `VARIATIONAL_BROWSER_REQUEST_AUTO_AUTHENTICATE=true` 기본값에 따라 Authenticate/Login 버튼을 한 번 자동 클릭하고 ready 상태를 다시 기다린다. 이때 WalletConnect SIGN REQUEST를 처리하려면 `tools/variational-wallet` signer가 살아 있어야 한다. 그래도 entry가 실패하면 BotEngine은 `VARIATIONAL_BROWSER_ENTRY_RETRY_COOLDOWN_SEC` 동안 새 entry request 생성을 억제해 같은 신호에서 실패 request가 연속 생성되는 것을 막는다.
 
 Dashboard HTTPS:
 

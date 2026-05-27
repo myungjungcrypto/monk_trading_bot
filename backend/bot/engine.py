@@ -150,6 +150,8 @@ class BotEngine:
         self._closing_trade_ids: set[str] = set()
         self._exit_retry_after: Dict[str, float] = {}
         self._exit_retry_cooldown_sec = float(os.getenv("VARIATIONAL_BROWSER_CLOSE_RETRY_COOLDOWN_SEC", "120"))
+        self._entry_retry_after: float = 0.0
+        self._entry_retry_cooldown_sec = float(os.getenv("VARIATIONAL_BROWSER_ENTRY_RETRY_COOLDOWN_SEC", "120"))
 
         # 첫 번째 활성 거래소 (주문 실행용)
         self._primary_exchange: Optional[BaseExchange] = None
@@ -755,6 +757,14 @@ class BotEngine:
 
     async def _handle_entry(self, signal: Signal) -> None:
         """시그널에 따라 페어 포지션을 엽니다."""
+        now = time.time()
+        if self._entry_retry_after > now:
+            logger.warning(
+                "Entry suppressed for %.1fs after failed Variational browser entry",
+                self._entry_retry_after - now,
+            )
+            return
+
         self._signal_count += 1
 
         direction = (
@@ -797,8 +807,10 @@ class BotEngine:
                 )
                 await self._notify_variational_requests("entry", variational_entry_batch)
                 if not await self._await_variational_browser_execution("entry", variational_entry_batch):
+                    self._entry_retry_after = time.time() + self._entry_retry_cooldown_sec
                     return
             except Exception as e:
+                self._entry_retry_after = time.time() + self._entry_retry_cooldown_sec
                 logger.error("Failed to create Variational entry requests: %s", e, exc_info=True)
                 if self.telegram:
                     await self.telegram.error("Variational entry request failed", str(e))

@@ -1599,8 +1599,30 @@ class VariationalBrowserGate {
 
   async waitForRequestWalletReady() {
     const deadline = Date.now() + this.config.requestWalletReadyWaitMs;
+    let authenticateClicked = false;
     let state = await this.assessWalletState();
     while (state.stage !== "ready" && Date.now() < deadline) {
+      if (
+        this.config.requestAutoAuthenticate
+        && !authenticateClicked
+        && state.stage === "auth_required"
+      ) {
+        const selector = await this.clickFirstAvailableOptional(
+          this.config.authenticateSelectors,
+          "authenticate",
+          1500,
+        );
+        if (selector) {
+          authenticateClicked = true;
+          console.log(`[Variational Browser] request auto-authenticate clicked: ${selector}`);
+          await this.telegram.trySendMessage([
+            "[Variational Browser] request auto-authenticate clicked",
+            `selector: ${selector}`,
+            "If WalletConnect asks for a SIGN REQUEST, keep variational-wallet running so it can approve/sign.",
+          ].join("\n"), undefined, "request auto-authenticate notice");
+          await this.page.waitForTimeout(this.config.authenticateWaitMs);
+        }
+      }
       await this.page.waitForTimeout(1000);
       state = await this.assessWalletState();
     }
@@ -1988,6 +2010,7 @@ function loadConfig() {
     authenticateWaitMs: Number(env("VARIATIONAL_BROWSER_AUTHENTICATE_WAIT_SEC", "15")) * 1000,
     stateSettleMs: Number(env("VARIATIONAL_BROWSER_STATE_SETTLE_SEC", "8")) * 1000,
     requestWalletReadyWaitMs: Number(env("VARIATIONAL_BROWSER_REQUEST_WALLET_READY_WAIT_SEC", "15")) * 1000,
+    requestAutoAuthenticate: envBool("VARIATIONAL_BROWSER_REQUEST_AUTO_AUTHENTICATE", true),
     watchIntervalMs: Number(env("VARIATIONAL_BROWSER_WATCH_INTERVAL_MS", "1000")),
     maxRequestAgeSec: Number(env("VARIATIONAL_BROWSER_MAX_REQUEST_AGE_SEC", "60")),
     viewport: parseViewport(env("VARIATIONAL_BROWSER_VIEWPORT", "1440x1200")),
