@@ -1840,12 +1840,39 @@ class VariationalBrowserGate {
   async hasWalletReadyText() {
     try {
       return await this.page.evaluate(() => {
-        const text = document.body?.innerText || "";
+        const visibleTexts = Array.from(document.querySelectorAll("button, [role='button'], a, div, span, p"))
+          .filter((element) => {
+            const style = window.getComputedStyle(element);
+            const rect = element.getBoundingClientRect();
+            return style.visibility !== "hidden"
+              && style.display !== "none"
+              && Number(style.opacity || "1") > 0
+              && rect.width > 0
+              && rect.height > 0
+              && rect.bottom >= 0
+              && rect.right >= 0
+              && rect.top <= window.innerHeight
+              && rect.left <= window.innerWidth;
+          })
+          .map((element) => [
+            element.innerText,
+            element.textContent,
+            element.getAttribute("aria-label"),
+            element.getAttribute("title"),
+          ].filter(Boolean).join(" "))
+          .join(" ");
+        const text = [
+          document.body?.innerText || "",
+          document.body?.textContent || "",
+          visibleTexts,
+        ].join(" ").replace(/\s+/g, " ");
         const hasWalletAddress = /0x[a-fA-F0-9]{4}.*[a-fA-F0-9]{4}/.test(text);
         const hasTradeReadyText = /Transfer/i.test(text)
           || /Available\s+to\s+Trade\s*\$?\s*[1-9]/i.test(text)
           || /Portfolio\s*\$?\s*[1-9]/i.test(text);
-        return hasWalletAddress && hasTradeReadyText;
+        const hasFundedPortfolio = /Portfolio\s*\$?\s*[1-9]/i.test(text)
+          || /Available\s+to\s+Trade\s*\$?\s*[1-9]/i.test(text);
+        return (hasWalletAddress && hasTradeReadyText) || (/Transfer/i.test(text) && hasFundedPortfolio);
       });
     } catch {
       return false;
@@ -1853,7 +1880,43 @@ class VariationalBrowserGate {
   }
 
   async hasVisibleOrderPanelReady() {
-    return this.hasVisibleBySelectors(this.config.walletOrderPanelReadySelectors);
+    return (await this.hasVisibleBySelectors(this.config.walletOrderPanelReadySelectors))
+      || (await this.hasOrderPanelReadyText());
+  }
+
+  async hasOrderPanelReadyText() {
+    try {
+      return await this.page.evaluate(() => {
+        const readyPattern = /\b(Enter\s+Size|Buy\s+BTC|Sell\s+BTC|Buy\s+ETH|Sell\s+ETH)\b/i;
+        const elements = Array.from(document.querySelectorAll("button, [role='button'], input, textarea, div, span"));
+        return elements.some((element) => {
+          const style = window.getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          if (style.visibility === "hidden"
+            || style.display === "none"
+            || Number(style.opacity || "1") <= 0
+            || rect.width <= 0
+            || rect.height <= 0
+            || rect.bottom < 0
+            || rect.right < 0
+            || rect.top > window.innerHeight
+            || rect.left > window.innerWidth) {
+            return false;
+          }
+          const text = [
+            element.innerText,
+            element.textContent,
+            element.getAttribute("aria-label"),
+            element.getAttribute("title"),
+            element.getAttribute("placeholder"),
+            element.value,
+          ].filter(Boolean).join(" ").replace(/\s+/g, " ");
+          return readyPattern.test(text);
+        });
+      });
+    } catch {
+      return false;
+    }
   }
 
   async hasVisibleAuthenticate() {
