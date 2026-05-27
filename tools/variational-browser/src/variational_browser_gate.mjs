@@ -474,6 +474,7 @@ class VariationalBrowserGate {
         "[Variational Browser] authenticate result",
         `stage: ${walletState.stage}`,
         `ready_visible: ${walletState.readyVisible}`,
+        `ready_text_visible: ${walletState.readyTextVisible}`,
         `connect_wallet_visible: ${walletState.connectWalletVisible}`,
         `authenticate_visible: ${walletState.authenticateVisible}`,
         `wallet_prompt_visible: ${walletState.walletPromptVisible}`,
@@ -546,6 +547,7 @@ class VariationalBrowserGate {
         `stage: ${walletState.stage}`,
         `ready: ${walletState.stage === "ready"}`,
         `ready_visible: ${walletState.readyVisible}`,
+        `ready_text_visible: ${walletState.readyTextVisible}`,
         `connect_wallet_visible: ${walletState.connectWalletVisible}`,
         `authenticate_visible: ${walletState.authenticateVisible}`,
         `wallet_prompt_visible: ${walletState.walletPromptVisible}`,
@@ -661,6 +663,7 @@ class VariationalBrowserGate {
           `id: ${request.id || ""}`,
           `stage: ${walletState.stage}`,
           `ready_visible: ${walletState.readyVisible}`,
+          `ready_text_visible: ${walletState.readyTextVisible}`,
           `connect_wallet_visible: ${walletState.connectWalletVisible}`,
           `authenticate_visible: ${walletState.authenticateVisible}`,
           `wallet_prompt_visible: ${walletState.walletPromptVisible}`,
@@ -688,6 +691,7 @@ class VariationalBrowserGate {
             `id: ${request.id || ""}`,
             `stage: ${postSetupState.stage}`,
             `ready_visible: ${postSetupState.readyVisible}`,
+            `ready_text_visible: ${postSetupState.readyTextVisible}`,
             `connect_wallet_visible: ${postSetupState.connectWalletVisible}`,
             `authenticate_visible: ${postSetupState.authenticateVisible}`,
             `wallet_prompt_visible: ${postSetupState.walletPromptVisible}`,
@@ -1779,6 +1783,7 @@ class VariationalBrowserGate {
 
   async assessWalletState() {
     const readyVisible = await this.hasVisibleWalletReady();
+    const readyTextVisible = await this.hasWalletReadyText();
     const connectWalletVisible = await this.hasVisibleConnectWallet();
     const authenticateVisible = await this.hasVisibleAuthenticate();
     const walletPromptVisible = await this.hasVisibleWalletPrompt();
@@ -1789,7 +1794,7 @@ class VariationalBrowserGate {
       stage = "human_verification_required";
     } else if (walletLostVisible) {
       stage = "reconnect_required";
-    } else if (readyVisible) {
+    } else if (readyVisible || readyTextVisible) {
       stage = "ready";
     } else if (connectWalletVisible) {
       stage = "disconnected";
@@ -1799,6 +1804,7 @@ class VariationalBrowserGate {
     return {
       stage,
       readyVisible,
+      readyTextVisible,
       connectWalletVisible,
       authenticateVisible,
       walletPromptVisible,
@@ -1823,6 +1829,21 @@ class VariationalBrowserGate {
 
   async hasVisibleWalletReady() {
     return this.hasVisibleBySelectors(this.config.walletReadySelectors);
+  }
+
+  async hasWalletReadyText() {
+    try {
+      return await this.page.evaluate(() => {
+        const text = document.body?.innerText || "";
+        const hasWalletAddress = /0x[a-fA-F0-9]{4}.*[a-fA-F0-9]{4}/.test(text);
+        const hasTradeReadyText = /Transfer/i.test(text)
+          || /Available\s+to\s+Trade\s*\$?\s*[1-9]/i.test(text)
+          || /Portfolio\s*\$?\s*[1-9]/i.test(text);
+        return hasWalletAddress && hasTradeReadyText;
+      });
+    } catch {
+      return false;
+    }
   }
 
   async hasVisibleAuthenticate() {
