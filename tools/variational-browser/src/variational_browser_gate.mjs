@@ -310,6 +310,7 @@ class VariationalBrowserGate {
     this.page = this.context.pages()[0] || await this.context.newPage();
     this.page.setDefaultTimeout(this.config.actionTimeoutMs);
     this.page.setDefaultNavigationTimeout(this.config.navigationTimeoutMs);
+    await this.applyViewportSize("startup");
     console.log(`[Variational Browser] browser ready pages=${this.context.pages().length}`);
   }
 
@@ -2117,11 +2118,25 @@ class VariationalBrowserGate {
   }
 
   async captureScreenshot(id) {
+    await this.applyViewportSize("screenshot");
     await this.clearPageSelection();
     const safeId = String(id).replace(/[^a-zA-Z0-9_.-]/g, "_");
     const filePath = path.join(this.config.screenshotDir, `${new Date().toISOString().replace(/[:.]/g, "-")}_${safeId}.png`);
     await this.page.screenshot({ path: filePath, fullPage: true });
     return filePath;
+  }
+
+  async applyViewportSize(reason = "") {
+    if (!this.page || !this.config.viewport?.width || !this.config.viewport?.height) return;
+    const current = this.page.viewportSize();
+    if (current?.width === this.config.viewport.width && current?.height === this.config.viewport.height) return;
+    try {
+      await this.page.setViewportSize(this.config.viewport);
+      console.log(`[Variational Browser] viewport set: ${this.config.viewport.width}x${this.config.viewport.height}${reason ? ` (${reason})` : ""}`);
+      await this.page.waitForTimeout(300);
+    } catch (error) {
+      console.warn(`[Variational Browser] viewport resize failed${reason ? ` (${reason})` : ""}: ${error.message}`);
+    }
   }
 
   buildApprovalBody(request, screenshotPath, confirmCandidates = []) {
