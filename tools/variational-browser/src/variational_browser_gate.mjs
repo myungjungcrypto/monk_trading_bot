@@ -567,12 +567,19 @@ class VariationalBrowserGate {
       `screenshot: ${screenshotPath}`,
     ].join("\n");
     console.log(statusText);
-    await this.telegram.trySendPhoto(
+    const statusPhoto = await this.telegram.trySendPhoto(
       screenshotPath,
       statusText.slice(0, 1024),
       undefined,
       "wallet status screenshot",
     );
+    if (!statusPhoto) {
+      await this.telegram.trySendMessage(
+        statusText.slice(0, 3500),
+        undefined,
+        "wallet status text fallback",
+      );
+    }
     return { status: walletState.stage, screenshotPath };
   }
 
@@ -2412,7 +2419,7 @@ function loadConfig() {
     telegramToken: requireEnv("VARIATIONAL_BROWSER_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"),
     telegramChatId: requireEnv("VARIATIONAL_BROWSER_TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID"),
     telegramAllowedUserIds: envList("VARIATIONAL_BROWSER_TELEGRAM_ALLOWED_USER_IDS", envList("TELEGRAM_ALLOWED_USER_IDS", [])),
-    telegramBestEffortTimeoutMs: Number(env("VARIATIONAL_BROWSER_TELEGRAM_BEST_EFFORT_TIMEOUT_SEC", "3")) * 1000,
+    telegramBestEffortTimeoutMs: Number(env("VARIATIONAL_BROWSER_TELEGRAM_BEST_EFFORT_TIMEOUT_SEC", "15")) * 1000,
     pollTelegram: envBool("VARIATIONAL_BROWSER_POLL_TELEGRAM", true),
     runtimeDir,
   };
