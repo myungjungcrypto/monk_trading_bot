@@ -475,6 +475,7 @@ class VariationalBrowserGate {
         `stage: ${walletState.stage}`,
         `ready_visible: ${walletState.readyVisible}`,
         `ready_text_visible: ${walletState.readyTextVisible}`,
+        `ready_order_panel_visible: ${walletState.readyOrderPanelVisible}`,
         `connect_wallet_visible: ${walletState.connectWalletVisible}`,
         `authenticate_visible: ${walletState.authenticateVisible}`,
         `wallet_prompt_visible: ${walletState.walletPromptVisible}`,
@@ -548,6 +549,7 @@ class VariationalBrowserGate {
         `ready: ${walletState.stage === "ready"}`,
         `ready_visible: ${walletState.readyVisible}`,
         `ready_text_visible: ${walletState.readyTextVisible}`,
+        `ready_order_panel_visible: ${walletState.readyOrderPanelVisible}`,
         `connect_wallet_visible: ${walletState.connectWalletVisible}`,
         `authenticate_visible: ${walletState.authenticateVisible}`,
         `wallet_prompt_visible: ${walletState.walletPromptVisible}`,
@@ -664,6 +666,7 @@ class VariationalBrowserGate {
           `stage: ${walletState.stage}`,
           `ready_visible: ${walletState.readyVisible}`,
           `ready_text_visible: ${walletState.readyTextVisible}`,
+          `ready_order_panel_visible: ${walletState.readyOrderPanelVisible}`,
           `connect_wallet_visible: ${walletState.connectWalletVisible}`,
           `authenticate_visible: ${walletState.authenticateVisible}`,
           `wallet_prompt_visible: ${walletState.walletPromptVisible}`,
@@ -692,6 +695,7 @@ class VariationalBrowserGate {
             `stage: ${postSetupState.stage}`,
             `ready_visible: ${postSetupState.readyVisible}`,
             `ready_text_visible: ${postSetupState.readyTextVisible}`,
+            `ready_order_panel_visible: ${postSetupState.readyOrderPanelVisible}`,
             `connect_wallet_visible: ${postSetupState.connectWalletVisible}`,
             `authenticate_visible: ${postSetupState.authenticateVisible}`,
             `wallet_prompt_visible: ${postSetupState.walletPromptVisible}`,
@@ -1784,6 +1788,7 @@ class VariationalBrowserGate {
   async assessWalletState() {
     const readyVisible = await this.hasVisibleWalletReady();
     const readyTextVisible = await this.hasWalletReadyText();
+    const readyOrderPanelVisible = await this.hasVisibleOrderPanelReady();
     const connectWalletVisible = await this.hasVisibleConnectWallet();
     const authenticateVisible = await this.hasVisibleAuthenticate();
     const walletPromptVisible = await this.hasVisibleWalletPrompt();
@@ -1794,7 +1799,7 @@ class VariationalBrowserGate {
       stage = "human_verification_required";
     } else if (walletLostVisible) {
       stage = "reconnect_required";
-    } else if (readyVisible || readyTextVisible) {
+    } else if (readyVisible || readyTextVisible || readyOrderPanelVisible) {
       stage = "ready";
     } else if (connectWalletVisible) {
       stage = "disconnected";
@@ -1805,6 +1810,7 @@ class VariationalBrowserGate {
       stage,
       readyVisible,
       readyTextVisible,
+      readyOrderPanelVisible,
       connectWalletVisible,
       authenticateVisible,
       walletPromptVisible,
@@ -1844,6 +1850,10 @@ class VariationalBrowserGate {
     } catch {
       return false;
     }
+  }
+
+  async hasVisibleOrderPanelReady() {
+    return this.hasVisibleBySelectors(this.config.walletOrderPanelReadySelectors);
   }
 
   async hasVisibleAuthenticate() {
@@ -2246,6 +2256,15 @@ function loadConfig() {
       'button:has-text("Transfer")',
       'text=/Portfolio\\s*\\$?\\d/i',
       'text=/0x[a-fA-F0-9]{4}.*[a-fA-F0-9]{4}/i',
+    ]),
+    walletOrderPanelReadySelectors: envList("VARIATIONAL_BROWSER_WALLET_ORDER_PANEL_READY_SELECTORS", [
+      'button:has-text("Enter Size")',
+      '[role="button"]:has-text("Enter Size")',
+      'button:has-text("Buy BTC")',
+      'button:has-text("Sell BTC")',
+      'button:has-text("Buy ETH")',
+      'button:has-text("Sell ETH")',
+      'text=/Enter\\s+Size/i',
     ]),
     walletLostSelectors: envList("VARIATIONAL_BROWSER_WALLET_LOST_SELECTORS", [
       'text=/Connection to your wallet was lost/i',
