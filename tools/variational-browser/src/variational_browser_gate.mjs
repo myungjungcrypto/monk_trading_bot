@@ -549,6 +549,7 @@ class VariationalBrowserGate {
     console.log(`[Variational Browser] status: assessed wallet stage=${walletState.stage}`);
     const screenshotPath = await this.captureScreenshot(`status-${Date.now()}`);
     console.log(`[Variational Browser] status: screenshot captured ${screenshotPath}`);
+    const visibleTextSample = (await this.collectVisibleFrameText()).slice(0, 500);
     const statusText = [
       "[Variational Browser] WALLET STATUS",
       `url: ${this.page.url()}`,
@@ -562,12 +563,13 @@ class VariationalBrowserGate {
       `wallet_prompt_visible: ${walletState.walletPromptVisible}`,
       `wallet_lost_visible: ${walletState.walletLostVisible}`,
       `human_challenge_visible: ${walletState.humanChallengeVisible}`,
+      `visible_text_sample: ${visibleTextSample}`,
       `screenshot: ${screenshotPath}`,
     ].join("\n");
     console.log(statusText);
     await this.telegram.trySendPhoto(
       screenshotPath,
-      statusText,
+      statusText.slice(0, 1024),
       undefined,
       "wallet status screenshot",
     );
@@ -1853,41 +1855,14 @@ class VariationalBrowserGate {
 
   async hasWalletReadyText() {
     try {
-      return await this.page.evaluate(() => {
-        const visibleTexts = Array.from(document.querySelectorAll("button, [role='button'], a, div, span, p"))
-          .filter((element) => {
-            const style = window.getComputedStyle(element);
-            const rect = element.getBoundingClientRect();
-            return style.visibility !== "hidden"
-              && style.display !== "none"
-              && Number(style.opacity || "1") > 0
-              && rect.width > 0
-              && rect.height > 0
-              && rect.bottom >= 0
-              && rect.right >= 0
-              && rect.top <= window.innerHeight
-              && rect.left <= window.innerWidth;
-          })
-          .map((element) => [
-            element.innerText,
-            element.textContent,
-            element.getAttribute("aria-label"),
-            element.getAttribute("title"),
-          ].filter(Boolean).join(" "))
-          .join(" ");
-        const text = [
-          document.body?.innerText || "",
-          document.body?.textContent || "",
-          visibleTexts,
-        ].join(" ").replace(/\s+/g, " ");
-        const hasWalletAddress = /0x[a-fA-F0-9]{4}.*[a-fA-F0-9]{4}/.test(text);
-        const hasTradeReadyText = /Transfer/i.test(text)
-          || /Available\s+to\s+Trade\s*\$?\s*[1-9]/i.test(text)
-          || /Portfolio\s*\$?\s*[1-9]/i.test(text);
-        const hasFundedPortfolio = /Portfolio\s*\$?\s*[1-9]/i.test(text)
-          || /Available\s+to\s+Trade\s*\$?\s*[1-9]/i.test(text);
-        return (hasWalletAddress && hasTradeReadyText) || (/Transfer/i.test(text) && hasFundedPortfolio);
-      });
+      const text = await this.collectVisibleFrameText();
+      const hasWalletAddress = /0x[a-fA-F0-9]{4}.*[a-fA-F0-9]{4}/.test(text);
+      const hasTradeReadyText = /Transfer/i.test(text)
+        || /Available\s+to\s+Trade\s*\$?\s*[1-9]/i.test(text)
+        || /Portfolio\s*\$?\s*[1-9]/i.test(text);
+      const hasFundedPortfolio = /Portfolio\s*\$?\s*[1-9]/i.test(text)
+        || /Available\s+to\s+Trade\s*\$?\s*[1-9]/i.test(text);
+      return (hasWalletAddress && hasTradeReadyText) || (/Transfer/i.test(text) && hasFundedPortfolio);
     } catch {
       return false;
     }
@@ -1900,37 +1875,52 @@ class VariationalBrowserGate {
 
   async hasOrderPanelReadyText() {
     try {
-      return await this.page.evaluate(() => {
-        const readyPattern = /\b(Enter\s+Size|Buy\s+BTC|Sell\s+BTC|Buy\s+ETH|Sell\s+ETH)\b/i;
-        const elements = Array.from(document.querySelectorAll("button, [role='button'], input, textarea, div, span"));
-        return elements.some((element) => {
-          const style = window.getComputedStyle(element);
-          const rect = element.getBoundingClientRect();
-          if (style.visibility === "hidden"
-            || style.display === "none"
-            || Number(style.opacity || "1") <= 0
-            || rect.width <= 0
-            || rect.height <= 0
-            || rect.bottom < 0
-            || rect.right < 0
-            || rect.top > window.innerHeight
-            || rect.left > window.innerWidth) {
-            return false;
-          }
-          const text = [
-            element.innerText,
-            element.textContent,
-            element.getAttribute("aria-label"),
-            element.getAttribute("title"),
-            element.getAttribute("placeholder"),
-            element.value,
-          ].filter(Boolean).join(" ").replace(/\s+/g, " ");
-          return readyPattern.test(text);
-        });
-      });
+      const text = await this.collectVisibleFrameText();
+      return /\b(Enter\s+Size|Buy\s+BTC|Sell\s+BTC|Buy\s+ETH|Sell\s+ETH)\b/i.test(text);
     } catch {
       return false;
     }
+  }
+
+  async collectVisibleFrameText() {
+    const chunks = [];
+    for (const frame of this.page.frames()) {
+      try {
+        chunks.push(await frame.evaluate(() => {
+          const visibleTexts = Array.from(document.querySelectorAll("button, [role='button'], a, input, textarea, div, span, p"))
+            .filter((element) => {
+              const style = window.getComputedStyle(element);
+              const rect = element.getBoundingClientRect();
+              return style.visibility !== "hidden"
+                && style.display !== "none"
+                && Number(style.opacity || "1") > 0
+                && rect.width > 0
+                && rect.height > 0
+                && rect.bottom >= 0
+                && rect.right >= 0
+                && rect.top <= window.innerHeight
+                && rect.left <= window.innerWidth;
+            })
+            .map((element) => [
+              element.innerText,
+              element.textContent,
+              element.getAttribute("aria-label"),
+              element.getAttribute("title"),
+              element.getAttribute("placeholder"),
+              element.value,
+            ].filter(Boolean).join(" "))
+            .join(" ");
+          return [
+            document.body?.innerText || "",
+            document.body?.textContent || "",
+            visibleTexts,
+          ].join(" ");
+        }));
+      } catch {
+        // Some cross-origin or transient frames can disappear while we inspect them.
+      }
+    }
+    return chunks.join(" ").replace(/\s+/g, " ");
   }
 
   async hasVisibleAuthenticate() {
@@ -1951,12 +1941,15 @@ class VariationalBrowserGate {
 
   async hasVisibleBySelectors(selectors) {
     for (const selector of selectors) {
-      const locators = await this.page.locator(selector).all();
-      for (const locator of locators) {
-        try {
-          if (await locator.isVisible()) return true;
-        } catch {
-          // Ignore stale locators.
+      const scopes = [this.page, ...this.page.frames()];
+      for (const scope of scopes) {
+        const locators = await scope.locator(selector).all().catch(() => []);
+        for (const locator of locators) {
+          try {
+            if (await locator.isVisible()) return true;
+          } catch {
+            // Ignore stale locators.
+          }
         }
       }
     }
