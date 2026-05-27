@@ -283,12 +283,14 @@ class VariationalBrowserGate {
     await ensureDir(this.config.requestDir);
 
     if (this.config.browserCdpEndpoint) {
-      this.browser = await chromium.connectOverCDP(this.config.browserCdpEndpoint);
+      console.log(`[Variational Browser] connecting to Chrome CDP: ${this.config.browserCdpEndpoint}`);
+      this.browser = await chromium.connectOverCDP(this.config.browserCdpEndpoint, { timeout: this.config.actionTimeoutMs });
       this.connectedOverCdp = true;
       this.context = this.browser.contexts()[0];
       if (!this.context) {
         throw new Error(`No browser context found after connecting to ${this.config.browserCdpEndpoint}`);
       }
+      console.log(`[Variational Browser] connected to Chrome CDP contexts=${this.browser.contexts().length}`);
     } else {
       const launchOptions = {
         headless: this.config.headless,
@@ -302,10 +304,13 @@ class VariationalBrowserGate {
         launchOptions.channel = this.config.browserChannel;
       }
 
+      console.log(`[Variational Browser] launching browser headless=${this.config.headless} executable=${this.config.browserExecutablePath || this.config.browserChannel || "playwright-default"}`);
       this.context = await chromium.launchPersistentContext(this.config.profileDir, launchOptions);
     }
     this.page = this.context.pages()[0] || await this.context.newPage();
     this.page.setDefaultTimeout(this.config.actionTimeoutMs);
+    this.page.setDefaultNavigationTimeout(this.config.navigationTimeoutMs);
+    console.log(`[Variational Browser] browser ready pages=${this.context.pages().length}`);
   }
 
   async stop() {
@@ -536,10 +541,14 @@ class VariationalBrowserGate {
   }
 
   async statusCurrentPage() {
-    await this.page.goto(this.config.url, { waitUntil: "domcontentloaded" });
+    console.log(`[Variational Browser] status: opening ${this.config.url}`);
+    await this.page.goto(this.config.url, { waitUntil: "domcontentloaded", timeout: this.config.navigationTimeoutMs });
+    console.log("[Variational Browser] status: page loaded, waiting for settle");
     await this.page.waitForTimeout(this.config.previewDelayMs);
     const walletState = await this.assessWalletState();
+    console.log(`[Variational Browser] status: assessed wallet stage=${walletState.stage}`);
     const screenshotPath = await this.captureScreenshot(`status-${Date.now()}`);
+    console.log(`[Variational Browser] status: screenshot captured ${screenshotPath}`);
     const statusText = [
       "[Variational Browser] WALLET STATUS",
       `url: ${this.page.url()}`,
@@ -2277,6 +2286,7 @@ function loadConfig() {
     autoClickOpenMaxSizeUsd: Number(env("VARIATIONAL_BROWSER_AUTO_CLICK_OPEN_MAX_SIZE_USD", "100")),
     approvalTimeoutMs: Number(env("VARIATIONAL_BROWSER_APPROVAL_TIMEOUT_SEC", "45")) * 1000,
     actionTimeoutMs: Number(env("VARIATIONAL_BROWSER_ACTION_TIMEOUT_SEC", "15000")),
+    navigationTimeoutMs: Number(env("VARIATIONAL_BROWSER_NAVIGATION_TIMEOUT_SEC", "30000")),
     previewDelayMs: Number(env("VARIATIONAL_BROWSER_PREVIEW_DELAY_MS", "1000")),
     afterClickDelayMs: Number(env("VARIATIONAL_BROWSER_AFTER_CLICK_DELAY_MS", "3000")),
     reduceOnlyBatchRetryAttempts: Number(env("VARIATIONAL_BROWSER_REDUCE_ONLY_BATCH_RETRY_ATTEMPTS", "3")),
