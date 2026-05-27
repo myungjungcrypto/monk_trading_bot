@@ -391,14 +391,14 @@ class VariationalBrowserGate {
       await this.page.waitForTimeout(this.config.previewDelayMs);
     }
     const beforePath = await this.captureScreenshot(`authenticate-before-${Date.now()}`);
-    const selector = await this.clickFirstAvailableOptional(this.config.authenticateSelectors, "authenticate", 5000);
+    const selector = await this.clickAuthenticateControl({ timeoutMs: 5000 });
     if (!selector) {
       await this.telegram.sendPhoto(
         beforePath,
         [
           "[Variational Browser] authenticate button not found",
           `url: ${this.page.url()}`,
-          `selectors: ${this.config.authenticateSelectors.join(", ")}`,
+          `selectors: ${this.config.authenticateSelectors.concat(this.config.walletPromptActionSelectors).join(", ")}`,
         ].join("\n").slice(0, 1024),
       );
       return { status: "not_found" };
@@ -1572,7 +1572,7 @@ class VariationalBrowserGate {
         return (await this.assessWalletState()).stage === "ready";
       }
       if (!authenticateClicked && walletState.stage === "auth_required") {
-        const selector = await this.clickFirstAvailableOptional(this.config.authenticateSelectors, "authenticate", 1000);
+        const selector = await this.clickAuthenticateControl({ timeoutMs: 1000 });
         if (selector) {
           authenticateClicked = true;
           await this.telegram.sendMessage([
@@ -1597,6 +1597,31 @@ class VariationalBrowserGate {
     return state;
   }
 
+  async clickAuthenticateControl({ timeoutMs = 1500 } = {}) {
+    const selector = await this.clickFirstAvailableOptional(this.config.authenticateSelectors, "authenticate", timeoutMs);
+    if (selector) return selector;
+
+    const promptSelector = await this.clickFirstAvailableOptional(
+      this.config.walletPromptActionSelectors,
+      "wallet prompt authenticate",
+      timeoutMs,
+    );
+    if (promptSelector) return promptSelector;
+
+    const state = await this.assessWalletState();
+    if (this.config.authenticateFallbackEnabled && state.walletPromptVisible) {
+      const viewport = this.page.viewportSize() || this.config.viewport;
+      const point = this.config.authenticateFallbackPoint;
+      const x = Math.round(viewport.width * point.x);
+      const y = Math.round(viewport.height * point.y);
+      console.log(`[Variational Browser] authenticate selector not found; clicking fallback point x=${x} y=${y}`);
+      await this.page.mouse.click(x, y);
+      return `fallback:${point.x},${point.y}`;
+    }
+
+    return "";
+  }
+
   async waitForRequestWalletReady() {
     const deadline = Date.now() + this.config.requestWalletReadyWaitMs;
     let authenticateClicked = false;
@@ -1607,11 +1632,7 @@ class VariationalBrowserGate {
         && !authenticateClicked
         && state.stage === "auth_required"
       ) {
-        const selector = await this.clickFirstAvailableOptional(
-          this.config.authenticateSelectors,
-          "authenticate",
-          1500,
-        );
+        const selector = await this.clickAuthenticateControl({ timeoutMs: 1500 });
         if (selector) {
           authenticateClicked = true;
           console.log(`[Variational Browser] request auto-authenticate clicked: ${selector}`);
@@ -2044,6 +2065,14 @@ function loadConfig() {
       'text=/Connect your wallet to see your positions/i',
       'text=/Authenticate/i',
     ]),
+    walletPromptActionSelectors: envList("VARIATIONAL_BROWSER_WALLET_PROMPT_ACTION_SELECTORS", [
+      'button:has-text("Authenticate")',
+      '[role="button"]:has-text("Authenticate")',
+      'button:has-text("Connect Wallet")',
+      '[role="button"]:has-text("Connect Wallet")',
+      'button:has-text("Continue")',
+      '[role="button"]:has-text("Continue")',
+    ]),
     orderMarketSelectors: envList("VARIATIONAL_BROWSER_MARKET_TAB_SELECTORS", [
       'button:has-text("Market")',
       '[role="tab"]:has-text("Market")',
@@ -2077,6 +2106,8 @@ function loadConfig() {
     ]),
     orderInputTimeoutMs: Number(env("VARIATIONAL_BROWSER_ORDER_INPUT_TIMEOUT_MS", "3000")),
     orderSetupDelayMs: Number(env("VARIATIONAL_BROWSER_ORDER_SETUP_DELAY_MS", "1200")),
+    authenticateFallbackEnabled: envBool("VARIATIONAL_BROWSER_AUTHENTICATE_FALLBACK_ENABLED", true),
+    authenticateFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_AUTHENTICATE_FALLBACK_POINT", "0.377,0.795")),
     orderSideFallbackEnabled: envBool("VARIATIONAL_BROWSER_SIDE_FALLBACK_ENABLED", true),
     orderBuyFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_BUY_FALLBACK_POINT", "0.82,0.186")),
     orderSellFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_SELL_FALLBACK_POINT", "0.94,0.186")),
