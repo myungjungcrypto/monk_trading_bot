@@ -2097,6 +2097,7 @@ function loadConfig() {
     telegramChatId: requireEnv("VARIATIONAL_BROWSER_TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID"),
     telegramAllowedUserIds: envList("VARIATIONAL_BROWSER_TELEGRAM_ALLOWED_USER_IDS", envList("TELEGRAM_ALLOWED_USER_IDS", [])),
     telegramBestEffortTimeoutMs: Number(env("VARIATIONAL_BROWSER_TELEGRAM_BEST_EFFORT_TIMEOUT_SEC", "3")) * 1000,
+    pollTelegram: envBool("VARIATIONAL_BROWSER_POLL_TELEGRAM", true),
     runtimeDir,
   };
 }
@@ -2186,7 +2187,7 @@ async function run() {
   }
 
   const gate = new VariationalBrowserGate(config);
-  const pollTelegram = args.approveClick || Boolean(args.request) || args.daemon;
+  const pollTelegram = config.pollTelegram && (args.approveClick || Boolean(args.request) || args.daemon);
   await gate.start({ pollTelegram });
 
   try {
