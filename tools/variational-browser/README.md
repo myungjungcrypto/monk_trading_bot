@@ -104,6 +104,21 @@ session is already paired and only auth is missing, run:
 npm start -- --authenticate
 ```
 
+If Variational shows `Connection to your wallet was lost` or a Cloudflare
+`Verify you are human` challenge after clicking authenticate, the browser never
+reached the WalletConnect `SIGN REQUEST` stage. Do not keep retrying
+authenticate. Clear only the Variational web storage and stale URI file, then
+start the WalletConnect flow from the beginning:
+
+```bash
+npm start -- --reset-wallet-session
+npm start -- --connect-wallet
+```
+
+The reset keeps cookies so a valid Cloudflare clearance is not intentionally
+discarded. If the human verification challenge is still visible, complete it
+manually in a visible browser/noVNC session before reconnecting.
+
 Keep `tools/variational-wallet` running while doing this, then approve the
 WalletConnect `SIGN REQUEST` in Telegram.
 

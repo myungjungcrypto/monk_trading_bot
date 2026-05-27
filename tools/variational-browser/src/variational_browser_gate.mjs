@@ -335,6 +335,20 @@ class VariationalBrowserGate {
       await this.telegram.sendMessage("[Variational Browser] wallet session already present; triggering authenticate instead of creating a new URI");
       return this.authenticateCurrentPage({ alreadyLoaded: true });
     }
+    if (initialState.stage === "human_verification_required" || initialState.stage === "reconnect_required") {
+      const screenshotPath = await this.captureScreenshot(`walletconnect-blocked-${Date.now()}`);
+      await this.telegram.sendPhoto(
+        screenshotPath,
+        [
+          "[Variational Browser] wallet reconnect is blocked",
+          `stage: ${initialState.stage}`,
+          `wallet_lost_visible: ${initialState.walletLostVisible}`,
+          `human_challenge_visible: ${initialState.humanChallengeVisible}`,
+          "Run --reset-wallet-session, then --connect-wallet again. If human verification is visible, complete it manually first.",
+        ].join("\n").slice(0, 1024),
+      );
+      return { status: initialState.stage };
+    }
 
     await this.clickFirstAvailable(this.config.connectWalletSelectors, "connect wallet");
     await this.page.waitForTimeout(1000);
@@ -390,6 +404,24 @@ class VariationalBrowserGate {
       await this.page.goto(this.config.url, { waitUntil: "domcontentloaded" });
       await this.page.waitForTimeout(this.config.previewDelayMs);
     }
+    const initialState = await this.assessWalletState();
+    if (initialState.stage === "human_verification_required" || initialState.stage === "reconnect_required") {
+      const screenshotPath = await this.captureScreenshot(`authenticate-blocked-${Date.now()}`);
+      await this.telegram.sendPhoto(
+        screenshotPath,
+        [
+          "[Variational Browser] authenticate blocked",
+          `stage: ${initialState.stage}`,
+          `connect_wallet_visible: ${initialState.connectWalletVisible}`,
+          `authenticate_visible: ${initialState.authenticateVisible}`,
+          `wallet_prompt_visible: ${initialState.walletPromptVisible}`,
+          `wallet_lost_visible: ${initialState.walletLostVisible}`,
+          `human_challenge_visible: ${initialState.humanChallengeVisible}`,
+          "This did not reach WalletConnect SIGN REQUEST. Reset/reconnect the wallet session instead.",
+        ].join("\n").slice(0, 1024),
+      );
+      return { status: initialState.stage };
+    }
     const beforePath = await this.captureScreenshot(`authenticate-before-${Date.now()}`);
     const selector = await this.clickAuthenticateControl({ timeoutMs: 5000 });
     if (!selector) {
@@ -423,9 +455,60 @@ class VariationalBrowserGate {
         `connect_wallet_visible: ${walletState.connectWalletVisible}`,
         `authenticate_visible: ${walletState.authenticateVisible}`,
         `wallet_prompt_visible: ${walletState.walletPromptVisible}`,
+        `wallet_lost_visible: ${walletState.walletLostVisible}`,
+        `human_challenge_visible: ${walletState.humanChallengeVisible}`,
       ].join("\n"),
     );
     return { status: walletState.stage, selector };
+  }
+
+  async resetWalletSession() {
+    await this.page.goto(this.config.url, { waitUntil: "domcontentloaded" });
+    await this.page.waitForTimeout(this.config.previewDelayMs);
+    await this.page.evaluate(async () => {
+      localStorage.clear();
+      sessionStorage.clear();
+      if ("caches" in window) {
+        for (const key of await caches.keys()) {
+          await caches.delete(key);
+        }
+      }
+      if (indexedDB.databases) {
+        const databases = await indexedDB.databases();
+        await Promise.all(databases
+          .map((database) => database.name)
+          .filter(Boolean)
+          .map((name) => new Promise((resolve) => {
+            const request = indexedDB.deleteDatabase(name);
+            request.onsuccess = () => resolve();
+            request.onerror = () => resolve();
+            request.onblocked = () => resolve();
+          })));
+      }
+    });
+    const uriPath = path.join(this.config.runtimeDir, "walletconnect_uri.txt");
+    await fs.promises.unlink(uriPath).catch((error) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+    await this.page.reload({ waitUntil: "domcontentloaded" });
+    await this.page.waitForTimeout(this.config.previewDelayMs);
+    const walletState = await this.assessWalletState();
+    const screenshotPath = await this.captureScreenshot(`wallet-session-reset-${Date.now()}`);
+    await this.telegram.sendPhoto(
+      screenshotPath,
+      [
+        "[Variational Browser] wallet session reset",
+        "Cleared Variational local/session storage, IndexedDB, caches, and stale wc URI file. Cookies were kept.",
+        `stage: ${walletState.stage}`,
+        `connect_wallet_visible: ${walletState.connectWalletVisible}`,
+        `authenticate_visible: ${walletState.authenticateVisible}`,
+        `wallet_prompt_visible: ${walletState.walletPromptVisible}`,
+        `wallet_lost_visible: ${walletState.walletLostVisible}`,
+        `human_challenge_visible: ${walletState.humanChallengeVisible}`,
+        "Next: npm start -- --connect-wallet",
+      ].join("\n").slice(0, 1024),
+    );
+    return { status: walletState.stage };
   }
 
   async statusCurrentPage() {
@@ -443,6 +526,8 @@ class VariationalBrowserGate {
         `connect_wallet_visible: ${walletState.connectWalletVisible}`,
         `authenticate_visible: ${walletState.authenticateVisible}`,
         `wallet_prompt_visible: ${walletState.walletPromptVisible}`,
+        `wallet_lost_visible: ${walletState.walletLostVisible}`,
+        `human_challenge_visible: ${walletState.humanChallengeVisible}`,
       ].join("\n"),
     );
     return { status: walletState.stage, screenshotPath };
@@ -1571,6 +1656,16 @@ class VariationalBrowserGate {
         await this.page.waitForTimeout(this.config.connectedStableMs);
         return (await this.assessWalletState()).stage === "ready";
       }
+      if (walletState.stage === "human_verification_required" || walletState.stage === "reconnect_required") {
+        await this.telegram.trySendMessage([
+          "[Variational Browser] wallet ready wait blocked",
+          `stage: ${walletState.stage}`,
+          `wallet_lost_visible: ${walletState.walletLostVisible}`,
+          `human_challenge_visible: ${walletState.humanChallengeVisible}`,
+          "This did not reach WalletConnect SIGN REQUEST. Reset/reconnect the wallet session instead.",
+        ].join("\n"), undefined, "wallet ready blocked notice");
+        return false;
+      }
       if (!authenticateClicked && walletState.stage === "auth_required") {
         const selector = await this.clickAuthenticateControl({ timeoutMs: 1000 });
         if (selector) {
@@ -1590,7 +1685,7 @@ class VariationalBrowserGate {
   async waitForInitialWalletState() {
     const deadline = Date.now() + this.config.stateSettleMs;
     let state = await this.assessWalletState();
-    while (state.stage === "disconnected" && Date.now() < deadline) {
+    while ((state.stage === "disconnected" || state.stage === "reconnect_required") && Date.now() < deadline) {
       await this.page.waitForTimeout(1000);
       state = await this.assessWalletState();
     }
@@ -1627,6 +1722,9 @@ class VariationalBrowserGate {
     let authenticateClicked = false;
     let state = await this.assessWalletState();
     while (state.stage !== "ready" && Date.now() < deadline) {
+      if (state.stage === "human_verification_required" || state.stage === "reconnect_required") {
+        return state;
+      }
       if (
         this.config.requestAutoAuthenticate
         && !authenticateClicked
@@ -1658,13 +1756,26 @@ class VariationalBrowserGate {
     const connectWalletVisible = await this.hasVisibleConnectWallet();
     const authenticateVisible = await this.hasVisibleAuthenticate();
     const walletPromptVisible = await this.hasVisibleWalletPrompt();
+    const walletLostVisible = await this.hasVisibleWalletLost();
+    const humanChallengeVisible = await this.hasVisibleHumanChallenge();
     let stage = "ready";
-    if (connectWalletVisible) {
+    if (humanChallengeVisible) {
+      stage = "human_verification_required";
+    } else if (walletLostVisible) {
+      stage = "reconnect_required";
+    } else if (connectWalletVisible) {
       stage = "disconnected";
     } else if (authenticateVisible || walletPromptVisible) {
       stage = "auth_required";
     }
-    return { stage, connectWalletVisible, authenticateVisible, walletPromptVisible };
+    return {
+      stage,
+      connectWalletVisible,
+      authenticateVisible,
+      walletPromptVisible,
+      walletLostVisible,
+      humanChallengeVisible,
+    };
   }
 
   async hasVisibleConnectWallet() {
@@ -1687,6 +1798,14 @@ class VariationalBrowserGate {
 
   async hasVisibleWalletPrompt() {
     return this.hasVisibleBySelectors(this.config.walletPromptSelectors);
+  }
+
+  async hasVisibleWalletLost() {
+    return this.hasVisibleBySelectors(this.config.walletLostSelectors);
+  }
+
+  async hasVisibleHumanChallenge() {
+    return this.hasVisibleBySelectors(this.config.humanChallengeSelectors);
   }
 
   async hasVisibleBySelectors(selectors) {
@@ -2065,6 +2184,19 @@ function loadConfig() {
       'text=/Connect your wallet to see your positions/i',
       'text=/Authenticate/i',
     ]),
+    walletLostSelectors: envList("VARIATIONAL_BROWSER_WALLET_LOST_SELECTORS", [
+      'text=/Connection to your wallet was lost/i',
+      'text=/Please reconnect your wallet/i',
+      'text=/Authentication Error/i',
+      'text=/Unable to load configuration data/i',
+    ]),
+    humanChallengeSelectors: envList("VARIATIONAL_BROWSER_HUMAN_CHALLENGE_SELECTORS", [
+      'text=/Are you a human/i',
+      'text=/Please complete the Captcha/i',
+      'text=/Verify you are human/i',
+      'iframe[title*="Cloudflare" i]',
+      'iframe[src*="challenges.cloudflare.com" i]',
+    ]),
     walletPromptActionSelectors: envList("VARIATIONAL_BROWSER_WALLET_PROMPT_ACTION_SELECTORS", [
       'button:has-text("Authenticate")',
       '[role="button"]:has-text("Authenticate")',
@@ -2181,6 +2313,7 @@ function parseArgs() {
     approveClick: args.includes("--approve-click"),
     connectWallet: args.includes("--connect-wallet"),
     authenticate: args.includes("--authenticate"),
+    resetWalletSession: args.includes("--reset-wallet-session"),
     status: args.includes("--status"),
     request: get("--request"),
     selector: get("--selector"),
@@ -2228,6 +2361,8 @@ async function run() {
       await gate.connectWallet();
     } else if (args.authenticate) {
       await gate.authenticateCurrentPage();
+    } else if (args.resetWalletSession) {
+      await gate.resetWalletSession();
     } else if (args.status) {
       await gate.statusCurrentPage();
     } else if (args.request) {
@@ -2241,6 +2376,7 @@ async function run() {
       console.log("  npm start -- --open");
       console.log("  npm start -- --connect-wallet");
       console.log("  npm start -- --authenticate");
+      console.log("  npm start -- --reset-wallet-session");
       console.log("  npm start -- --status");
       console.log("  npm start -- --approve-click --selector 'button:has-text(\"Submit\")'");
       console.log("  npm start -- --request runtime/requests/order.json");
