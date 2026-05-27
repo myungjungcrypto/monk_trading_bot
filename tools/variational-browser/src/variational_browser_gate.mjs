@@ -473,6 +473,7 @@ class VariationalBrowserGate {
       [
         "[Variational Browser] authenticate result",
         `stage: ${walletState.stage}`,
+        `ready_visible: ${walletState.readyVisible}`,
         `connect_wallet_visible: ${walletState.connectWalletVisible}`,
         `authenticate_visible: ${walletState.authenticateVisible}`,
         `wallet_prompt_visible: ${walletState.walletPromptVisible}`,
@@ -544,6 +545,7 @@ class VariationalBrowserGate {
         `url: ${this.page.url()}`,
         `stage: ${walletState.stage}`,
         `ready: ${walletState.stage === "ready"}`,
+        `ready_visible: ${walletState.readyVisible}`,
         `connect_wallet_visible: ${walletState.connectWalletVisible}`,
         `authenticate_visible: ${walletState.authenticateVisible}`,
         `wallet_prompt_visible: ${walletState.walletPromptVisible}`,
@@ -658,6 +660,7 @@ class VariationalBrowserGate {
           "[Variational Browser] request blocked: wallet not ready",
           `id: ${request.id || ""}`,
           `stage: ${walletState.stage}`,
+          `ready_visible: ${walletState.readyVisible}`,
           `connect_wallet_visible: ${walletState.connectWalletVisible}`,
           `authenticate_visible: ${walletState.authenticateVisible}`,
           `wallet_prompt_visible: ${walletState.walletPromptVisible}`,
@@ -684,6 +687,7 @@ class VariationalBrowserGate {
             "[Variational Browser] request blocked after order setup: wallet not ready",
             `id: ${request.id || ""}`,
             `stage: ${postSetupState.stage}`,
+            `ready_visible: ${postSetupState.readyVisible}`,
             `connect_wallet_visible: ${postSetupState.connectWalletVisible}`,
             `authenticate_visible: ${postSetupState.authenticateVisible}`,
             `wallet_prompt_visible: ${postSetupState.walletPromptVisible}`,
@@ -1774,6 +1778,7 @@ class VariationalBrowserGate {
   }
 
   async assessWalletState() {
+    const readyVisible = await this.hasVisibleWalletReady();
     const connectWalletVisible = await this.hasVisibleConnectWallet();
     const authenticateVisible = await this.hasVisibleAuthenticate();
     const walletPromptVisible = await this.hasVisibleWalletPrompt();
@@ -1784,6 +1789,8 @@ class VariationalBrowserGate {
       stage = "human_verification_required";
     } else if (walletLostVisible) {
       stage = "reconnect_required";
+    } else if (readyVisible) {
+      stage = "ready";
     } else if (connectWalletVisible) {
       stage = "disconnected";
     } else if (authenticateVisible || walletPromptVisible) {
@@ -1791,6 +1798,7 @@ class VariationalBrowserGate {
     }
     return {
       stage,
+      readyVisible,
       connectWalletVisible,
       authenticateVisible,
       walletPromptVisible,
@@ -1811,6 +1819,10 @@ class VariationalBrowserGate {
       }
     }
     return false;
+  }
+
+  async hasVisibleWalletReady() {
+    return this.hasVisibleBySelectors(this.config.walletReadySelectors);
   }
 
   async hasVisibleAuthenticate() {
@@ -2208,6 +2220,11 @@ function loadConfig() {
     walletPromptSelectors: envList("VARIATIONAL_BROWSER_WALLET_PROMPT_SELECTORS", [
       'text=/Connect your wallet to see your positions/i',
       'text=/Authenticate/i',
+    ]),
+    walletReadySelectors: envList("VARIATIONAL_BROWSER_WALLET_READY_SELECTORS", [
+      'button:has-text("Transfer")',
+      'text=/Portfolio\\s*\\$?\\d/i',
+      'text=/0x[a-fA-F0-9]{4}.*[a-fA-F0-9]{4}/i',
     ]),
     walletLostSelectors: envList("VARIATIONAL_BROWSER_WALLET_LOST_SELECTORS", [
       'text=/Connection to your wallet was lost/i',
