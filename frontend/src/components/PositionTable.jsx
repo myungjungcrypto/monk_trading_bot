@@ -1,4 +1,4 @@
-export default function PositionTable({ trades }) {
+export default function PositionTable({ trades, onReconcileExternalClose }) {
   if (!trades || trades.length === 0) {
     return <div style={styles.empty}>No trades yet</div>;
   }
@@ -19,11 +19,13 @@ export default function PositionTable({ trades }) {
               <th style={styles.th}>Costs</th>
               <th style={styles.th}>Exit</th>
               <th style={styles.th}>Time</th>
+              <th style={styles.th}>Action</th>
             </tr>
           </thead>
           <tbody>
             {trades.map((t) => {
               const isOpen = !t.closed_at;
+              const canReconcile = isOpen && t.exchange === "variational_browser";
               return (
                 <tr key={t.id}>
                   <td style={styles.td}>{t.id}</td>
@@ -59,6 +61,16 @@ export default function PositionTable({ trades }) {
                     {t.opened_at
                       ? new Date(t.opened_at).toLocaleString()
                       : "-"}
+                  </td>
+                  <td style={styles.td}>
+                    {canReconcile ? (
+                      <button
+                        style={styles.reconcileBtn}
+                        onClick={() => onReconcileExternalClose?.(t.id)}
+                      >
+                        Clear External
+                      </button>
+                    ) : "-"}
                   </td>
                 </tr>
               );
@@ -101,6 +113,16 @@ const styles = {
     padding: "8px 12px",
     borderBottom: "1px solid #1f2233",
     whiteSpace: "nowrap",
+  },
+  reconcileBtn: {
+    padding: "6px 10px",
+    background: "#27272a",
+    color: "#fca5a5",
+    border: "1px solid #7f1d1d",
+    borderRadius: "6px",
+    cursor: "pointer",
+    fontSize: "12px",
+    fontWeight: 600,
   },
   empty: {
     background: "#1a1d29",

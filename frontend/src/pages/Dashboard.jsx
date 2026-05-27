@@ -8,6 +8,7 @@ import {
   startBot,
   stopBot,
   setKillSwitch,
+  reconcileExternalClose,
   createDashboardWs,
 } from "../api/client";
 import PNLChart from "../components/PNLChart";
@@ -119,6 +120,21 @@ export default function Dashboard() {
     setLoading(false);
   };
 
+  const handleReconcileExternalClose = async (tradeId) => {
+    const ok = window.confirm(
+      `Only use this after the real Variational position for DB trade #${tradeId} is already closed. Clear the dashboard/DB position?`
+    );
+    if (!ok) return;
+    setLoading(true);
+    try {
+      await reconcileExternalClose(tradeId, "EXTERNAL_MANUAL_CLOSE");
+      await loadRuntimeData();
+    } catch (err) {
+      alert(err.response?.data?.detail || "Reconcile failed");
+    }
+    setLoading(false);
+  };
+
   const handleLogout = () => {
     localStorage.removeItem("token");
     navigate("/login");
@@ -221,7 +237,7 @@ export default function Dashboard() {
       <SpreadChart data={spreadData} />
 
       {/* Trades Table */}
-      <PositionTable trades={trades} />
+      <PositionTable trades={trades} onReconcileExternalClose={handleReconcileExternalClose} />
     </div>
   );
 }

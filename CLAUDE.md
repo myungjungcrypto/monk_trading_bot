@@ -883,6 +883,7 @@ Emergency Kill Switch:
 - Variational browser daemon은 kill switch가 active이면 새 request 파일 처리를 멈추고, 이미 클릭 직전인 경로도 `clickConfirm()`에서 한 번 더 차단한다.
 - `Reset Kill`은 kill switch만 해제한다. 봇은 자동 재시작하지 않으므로, 실제 Variational 포지션 상태를 확인한 뒤 수동으로 다시 `Run Swing`/start 해야 한다.
 - Kill switch를 누르는 순간 이미 첫 다리 click이 끝난 상태라면 두 번째 다리 click은 막힐 수 있다. 이 경우 실제 Variational 포지션을 먼저 확인하고 한쪽 노출이 남았으면 수동 정리한다.
+- 실제 Variational 포지션을 사용자가 웹에서 이미 수동 청산했는데 대시보드/DB에만 `OPEN`이 남으면 `Clear External` 버튼 또는 `/api/bot/reconcile-external-close`를 사용한다. 이 경로는 새 주문을 내지 않고 `variational_browser` DB trade와 BotEngine 메모리 포지션만 `EXTERNAL_MANUAL_CLOSE`로 닫는다. 실제 포지션이 없는 것을 먼저 확인한 뒤에만 사용한다.
 
 Dashboard HTTPS:
 

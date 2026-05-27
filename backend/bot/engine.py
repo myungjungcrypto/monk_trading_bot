@@ -12,7 +12,7 @@ import os
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from backend.bot.exchanges.backpack import BackpackExchange
 from backend.bot.exchanges.base import BaseExchange, PositionSide
@@ -362,6 +362,52 @@ class BotEngine:
             btc_current=btc_current,
             eth_current=eth_current,
         )
+
+    async def reconcile_external_close(
+        self,
+        db_trade_id: Optional[int] = None,
+        reason: str = "EXTERNAL_MANUAL_CLOSE",
+        pnl_usd: float = 0.0,
+    ) -> Dict[str, Any]:
+        """실제 거래소 포지션이 외부에서 닫힌 경우 가상/DB 상태만 닫습니다."""
+        if self.trade_recorder is None:
+            return {"closed": [], "message": "Trade recorder is not configured"}
+
+        db_trades = await self.trade_recorder.fetch_open_trades(exchange=self._virtual_exchange_name)
+        if db_trade_id is not None:
+            db_trades = [trade for trade in db_trades if trade.id == db_trade_id]
+        closed = []
+
+        for db_trade in db_trades:
+            trade_id = next(
+                (tid for tid, mapped_db_id in self._trade_db_ids.items() if mapped_db_id == db_trade.id),
+                None,
+            )
+            if trade_id:
+                self.position_manager.mark_virtual_pair_externally_closed(trade_id, reason)
+                self._trade_db_ids.pop(trade_id, None)
+                self._closing_trade_ids.discard(trade_id)
+                self._exit_retry_after.pop(trade_id, None)
+                self.risk_manager.on_trade_closed(trade_id, float(pnl_usd or 0.0))
+
+            ok = await self.trade_recorder.mark_open_trade_external_closed(
+                db_trade.id,
+                reason=reason,
+                pnl_usd=float(pnl_usd or 0.0),
+                open_positions=len(self.position_manager.open_trades),
+            )
+            if ok:
+                closed.append({"db_trade_id": db_trade.id, "trade_id": trade_id, "reason": reason})
+
+        if closed and self.telegram:
+            await self.telegram.status(
+                "\n".join([
+                    "Reconciled externally closed Variational position(s)",
+                    f"closed_db_trade_ids: {', '.join(str(item['db_trade_id']) for item in closed)}",
+                    f"reason: {reason}",
+                ])
+            )
+        return {"closed": closed}
 
     @staticmethod
     def _datetime_to_timestamp(value) -> float:

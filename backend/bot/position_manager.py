@@ -415,6 +415,25 @@ class PositionManager:
         )
         return trade
 
+    def mark_virtual_pair_externally_closed(self, trade_id: str, reason: str = "EXTERNAL_MANUAL_CLOSE") -> Optional[PairTrade]:
+        """실제 포지션이 외부에서 이미 닫힌 가상 포지션을 메모리에서 제거합니다."""
+        trade = self._open_trades.get(trade_id)
+        if trade is None:
+            logger.warning("Virtual trade not found for external close: %s", trade_id)
+            return None
+
+        trade.is_open = False
+        trade.closed_at = time.time()
+        trade.btc_leg.unrealized_pnl = 0.0
+        trade.eth_leg.unrealized_pnl = 0.0
+        del self._open_trades[trade_id]
+        self._closed_trades.append(trade)
+        logger.warning(
+            "Virtual pair marked externally closed: %s | reason=%s | PNL forced to $0.00",
+            trade_id, reason,
+        )
+        return trade
+
     @staticmethod
     def _update_leg_mark(leg: LegInfo, price: float) -> None:
         leg.current_price = price

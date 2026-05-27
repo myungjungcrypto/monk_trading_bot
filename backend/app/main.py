@@ -214,6 +214,12 @@ class KillSwitchRequest(BaseModel):
     reason: Optional[str] = None
 
 
+class ReconcileExternalCloseRequest(BaseModel):
+    trade_id: Optional[int] = None
+    reason: Optional[str] = "EXTERNAL_MANUAL_CLOSE"
+    pnl_usd: float = 0.0
+
+
 async def _auto_resume_open_trades(session_factory) -> None:
     """백엔드 재시작 시 열린 DB 거래가 있으면 봇을 자동 재시작합니다."""
     enabled = os.getenv("AUTO_RESUME_OPEN_TRADES", "true").lower() not in {"0", "false", "no"}
@@ -573,6 +579,59 @@ async def bot_kill_switch(
 
     logger.info("Emergency kill switch cleared by %s", user.username)
     return {"status": "cleared", "kill_switch": state}
+
+
+@app.post("/api/bot/reconcile-external-close")
+async def bot_reconcile_external_close(
+    req: ReconcileExternalCloseRequest,
+    user: TokenData = Depends(get_current_user),
+):
+    """
+    Mark Variational virtual/DB positions closed after the real web position
+    was manually closed outside the bot.
+    """
+    reason = (req.reason or "EXTERNAL_MANUAL_CLOSE").strip()[:50] or "EXTERNAL_MANUAL_CLOSE"
+    pnl_usd = float(req.pnl_usd or 0.0)
+
+    if _bot_engine and _bot_engine.is_running and getattr(_bot_engine, "execution_mode", "") == "variational_browser":
+        result = await _bot_engine.reconcile_external_close(
+            db_trade_id=req.trade_id,
+            reason=reason,
+            pnl_usd=pnl_usd,
+        )
+    else:
+        from backend.bot.trade_recorder import TradeRecorder
+
+        sf = getattr(app.state, "session_factory", None)
+        if sf is None:
+            raise HTTPException(500, "Database not configured")
+
+        recorder = TradeRecorder(sf)
+        open_trades = await recorder.fetch_open_trades(exchange="variational_browser")
+        if req.trade_id is not None:
+            open_trades = [trade for trade in open_trades if trade.id == req.trade_id]
+
+        closed = []
+        for db_trade in open_trades:
+            ok = await recorder.mark_open_trade_external_closed(
+                db_trade.id,
+                reason=reason,
+                pnl_usd=pnl_usd,
+                open_positions=0,
+            )
+            if ok:
+                closed.append({"db_trade_id": db_trade.id, "trade_id": None, "reason": reason})
+        result = {"closed": closed}
+
+    closed = result.get("closed", [])
+    if not closed:
+        raise HTTPException(404, "No open Variational browser DB trade matched")
+
+    logger.warning(
+        "External Variational close reconciled by %s: trade_id=%s closed=%s reason=%s",
+        user.username, req.trade_id, closed, reason,
+    )
+    return {"status": "reconciled", "pnl_usd": pnl_usd, **result}
 
 
 # ── 대시보드 WebSocket ───────────────────────────────────

@@ -96,6 +96,21 @@ class TradeRecorder:
 
     async def mark_open_trade_unconfirmed(self, db_trade_id: int, reason: str) -> bool:
         """Mark a DB-open trade closed when browser execution was not confirmed."""
+        return await self.mark_open_trade_external_closed(
+            db_trade_id,
+            reason=reason,
+            pnl_usd=0.0,
+            open_positions=0,
+        )
+
+    async def mark_open_trade_external_closed(
+        self,
+        db_trade_id: int,
+        reason: str,
+        pnl_usd: float = 0.0,
+        open_positions: int = 0,
+    ) -> bool:
+        """Mark a DB-open trade closed after the real position was closed elsewhere."""
         try:
             async with self._session_factory() as db:
                 db_trade = await db.get(Trade, db_trade_id)
@@ -106,16 +121,19 @@ class TradeRecorder:
                     return True
 
                 db_trade.closed_at = datetime.now(timezone.utc)
-                db_trade.pnl_usd = db_trade.pnl_usd or 0.0
-                db_trade.net_pnl_usd = db_trade.net_pnl_usd or 0.0
+                db_trade.pnl_usd = float(pnl_usd or 0.0)
+                db_trade.net_pnl_usd = float(pnl_usd or 0.0)
                 db_trade.exit_reason = reason
                 await db.flush()
-                await self._record_pnl_snapshot(db, open_positions=0)
+                await self._record_pnl_snapshot(db, open_positions=open_positions)
                 await db.commit()
-                logger.info("Unconfirmed browser trade closed in DB: id=%d reason=%s", db_trade_id, reason)
+                logger.info(
+                    "Open trade externally closed in DB: id=%d reason=%s pnl=$%.2f",
+                    db_trade_id, reason, float(pnl_usd or 0.0),
+                )
                 return True
         except Exception as e:
-            logger.error("Failed to mark unconfirmed trade closed: %s", e)
+            logger.error("Failed to mark open trade externally closed: %s", e)
             return False
 
     async def record_full(self, trade: PairTrade, exit_reason: str, signal_mode: str = "scalp") -> Optional[int]:
