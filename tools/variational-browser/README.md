@@ -165,6 +165,37 @@ With this mode, `--status`, `--connect-wallet`, and the daemon operate against
 the already-running Chrome. One-shot commands disconnect from Chrome on exit
 instead of closing the browser.
 
+For production, do not keep this Chrome attached to an SSH/XQuartz terminal.
+Run it as its own PM2 process so it survives SSH disconnects and can be
+restarted independently:
+
+```bash
+cd ~/monk_trading_bot
+
+# One-time dependencies on Amazon Linux 2023.
+sudo dnf install -y xorg-x11-server-Xvfb
+sudo dnf install -y https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm
+
+# Stop any manually opened Chrome that is using the same runtime/profile.
+pkill -f 'remote-debugging-port=9222' || true
+
+# tools/variational-browser/.env:
+# VARIATIONAL_BROWSER_CDP_ENDPOINT=http://127.0.0.1:9222
+# VARIATIONAL_CHROME_HEADLESS=false
+# VARIATIONAL_CHROME_AUTO_XVFB=true
+
+pm2 start ecosystem.config.json --only variational-chrome --update-env
+pm2 restart variational-browser --update-env
+pm2 save
+```
+
+`variational-chrome` starts `google-chrome-stable` with
+`--remote-debugging-port=9222`, the shared `runtime/profile`, and an Xvfb display
+when no real `DISPLAY` is present. The browser daemon then attaches to
+`http://127.0.0.1:9222` instead of launching or owning Chrome. If Cloudflare
+requires a new human challenge, complete it once in a visible session using the
+same profile, then restart `variational-chrome`.
+
 Keep `tools/variational-wallet` running while doing this, then approve the
 WalletConnect `SIGN REQUEST` in Telegram.
 

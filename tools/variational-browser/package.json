@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "node src/variational_browser_gate.mjs",
+    "start:chrome": "node src/start_chrome_cdp.mjs",
     "check": "node --check src/variational_browser_gate.mjs"
   },
   "dependencies": {
@@ -12,4 +13,3 @@
     "playwright": "^1.57.0"
   }
 }
-
