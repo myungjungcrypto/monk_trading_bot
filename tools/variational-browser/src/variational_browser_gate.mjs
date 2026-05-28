@@ -1293,7 +1293,7 @@ class VariationalBrowserGate {
   async setupVariationalOrder(order) {
     const symbol = String(order.symbol || "").toUpperCase();
     const side = String(order.side || "").toUpperCase();
-    const quantity = String(order.quantity ?? "").trim();
+    let quantity = String(order.quantity ?? "").trim();
     const orderType = String(order.orderType || "market").toLowerCase();
     const reduceOnly = Boolean(order.reduceOnly);
     const action = String(order.action || "").toLowerCase();
@@ -1337,6 +1337,14 @@ class VariationalBrowserGate {
           throw noPositionForReduceOnlyError(symbol, error.message);
         }
         throw error;
+      }
+    }
+
+    if (reduceOnly && action === "close") {
+      const adjustedQuantity = await this.adjustReduceOnlyCloseQuantity(symbol, quantity);
+      if (adjustedQuantity !== quantity) {
+        console.log(`[Variational Browser] reduce-only close quantity capped: ${symbol} ${quantity} -> ${adjustedQuantity}`);
+        quantity = adjustedQuantity;
       }
     }
 
@@ -1418,6 +1426,94 @@ class VariationalBrowserGate {
 
       return false;
     }, symbol).catch(() => false);
+  }
+
+  async adjustReduceOnlyCloseQuantity(symbol, requestedQuantity) {
+    const requested = Number(requestedQuantity);
+    if (!Number.isFinite(requested) || requested <= 0) return String(requestedQuantity);
+
+    const current = await this.readCurrentPositionQuantityForSymbol(symbol);
+    const decimals = Math.max(
+      symbol === "BTC" ? 6 : 4,
+      decimalPlacesFromText(requestedQuantity),
+      decimalPlacesFromText(current?.raw || ""),
+    );
+    const step = 10 ** -decimals;
+    let cap = NaN;
+
+    if (current && Number.isFinite(current.quantity) && Math.abs(current.quantity) > 0) {
+      const absPosition = Math.abs(current.quantity);
+      cap = Math.floor((Math.max(absPosition - step, 0) + step / 10) / step) * step;
+      console.log(
+        `[Variational Browser] current ${symbol} position: ${current.raw} (${current.source}); ` +
+        `reduce-only cap=${formatDecimalQuantity(cap, decimals)}`,
+      );
+    } else {
+      const safetyBps = Math.max(0, Number(this.config.reduceOnlyQuantitySafetyBps || 0));
+      cap = Math.floor((requested * (1 - safetyBps / 10000)) / step) * step;
+      console.log(
+        `[Variational Browser] current ${symbol} position not parsed; ` +
+        `using reduce-only safety cap=${formatDecimalQuantity(cap, decimals)}`,
+      );
+    }
+
+    if (!Number.isFinite(cap) || cap <= 0) {
+      throw new Error(`Could not derive safe reduce-only close quantity for ${symbol}`);
+    }
+
+    const adjusted = Math.min(requested, cap);
+    if (!Number.isFinite(adjusted) || adjusted <= 0) {
+      throw new Error(`Adjusted reduce-only close quantity is invalid for ${symbol}: ${adjusted}`);
+    }
+    return formatDecimalQuantity(adjusted, decimals);
+  }
+
+  async readCurrentPositionQuantityForSymbol(symbol) {
+    return this.page.evaluate((asset) => {
+      const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+      const parseQuantity = (value) => {
+        const raw = normalize(value).replace(/\u2212/g, "-");
+        const match = raw.match(/[-+]?\d[\d,]*(?:\.\d+)?/);
+        if (!match) return null;
+        const quantity = Number(match[0].replace(/,/g, ""));
+        if (!Number.isFinite(quantity)) return null;
+        return { quantity, raw };
+      };
+
+      const text = document.body?.innerText || "";
+      const lines = text.split(/\n+/).map(normalize).filter(Boolean);
+      const symbolRe = new RegExp(`\\b${asset}\\s*[-/]?\\s*PERP\\b`, "i");
+      const assetValueRe = new RegExp(`\\b${asset}\\b`, "i");
+
+      for (let i = 0; i < lines.length; i += 1) {
+        if (!/^Current Position$/i.test(lines[i])) continue;
+        const next = lines[i + 1] || "";
+        if (next && assetValueRe.test(next)) {
+          const parsed = parseQuantity(next);
+          if (parsed) return { ...parsed, source: "current-position-label" };
+        }
+      }
+
+      for (let i = 0; i < lines.length; i += 1) {
+        if (!/^Current Position\b/i.test(lines[i])) continue;
+        const parsed = parseQuantity(lines[i]);
+        if (parsed && assetValueRe.test(lines[i])) {
+          return { ...parsed, source: "current-position-inline" };
+        }
+      }
+
+      for (let i = 0; i < lines.length; i += 1) {
+        if (!symbolRe.test(lines[i])) continue;
+        for (let j = i + 1; j < Math.min(lines.length, i + 5); j += 1) {
+          const parsed = parseQuantity(lines[j]);
+          if (parsed && /^[-+]?\d[\d,]*(?:\.\d+)?$/.test(parsed.raw)) {
+            return { ...parsed, source: "positions-table" };
+          }
+        }
+      }
+
+      return null;
+    }, symbol).catch(() => null);
   }
 
   async assertReduceOnlyChecked(context = "") {
@@ -2485,6 +2581,7 @@ function loadConfig() {
     reduceOnlyFallbackEnabled: envBool("VARIATIONAL_BROWSER_REDUCE_ONLY_FALLBACK_ENABLED", false),
     reduceOnlyFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_REDUCE_ONLY_FALLBACK_POINT", "0.768,0.340")),
     requireReduceOnlyChecked: envBool("VARIATIONAL_BROWSER_REQUIRE_REDUCE_ONLY_CHECKED", true),
+    reduceOnlyQuantitySafetyBps: Number(env("VARIATIONAL_BROWSER_REDUCE_ONLY_QUANTITY_SAFETY_BPS", "1")),
     confirmCandidateMinXRatio: Number(env("VARIATIONAL_BROWSER_CONFIRM_CANDIDATE_MIN_X_RATIO", "0.70")),
     confirmCandidateMinYRatio: Number(env("VARIATIONAL_BROWSER_CONFIRM_CANDIDATE_MIN_Y_RATIO", "0.30")),
     confirmCandidateMaxYRatio: Number(env("VARIATIONAL_BROWSER_CONFIRM_CANDIDATE_MAX_Y_RATIO", "0.60")),
@@ -2567,6 +2664,18 @@ function randomId() {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function decimalPlacesFromText(value) {
+  const match = String(value ?? "").match(/\.(\d+)/);
+  return match ? match[1].length : 0;
+}
+
+function formatDecimalQuantity(value, decimals) {
+  if (!Number.isFinite(value)) return "";
+  return value
+    .toFixed(Math.max(0, decimals))
+    .replace(/\.?0+$/, "");
 }
 
 function noPositionForReduceOnlyError(symbol, cause = "") {
