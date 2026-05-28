@@ -597,6 +597,8 @@ class VariationalBrowserGate {
     } catch (error) {
       const status = String(error?.message || "").startsWith("request expired:")
         ? "expired"
+        : error?.code === "BROWSER_UNAVAILABLE" || isBrowserUnavailableError(error)
+          ? "browser_unavailable"
         : "failed";
       await this.archiveRequestFile(processingPath, raw, status, filePath);
       error.archivedStatus = status;
@@ -650,6 +652,19 @@ class VariationalBrowserGate {
         try {
           await this.processRequestFile(filePath);
         } catch (error) {
+          if (error.archivedStatus === "browser_unavailable" || isBrowserUnavailableError(error)) {
+            await this.telegram.trySendMessage(
+              [
+                "[Variational Browser] browser unavailable; exiting daemon for PM2 restart",
+                `file: ${name}`,
+                `error: ${error.message}`,
+                "If this repeats, restart the Chrome process opened with --remote-debugging-port=9222.",
+              ].join("\n"),
+              undefined,
+              "browser unavailable notice",
+            );
+            process.exit(3);
+          }
           await this.telegram.trySendMessage(
             `[Variational Browser] request failed\nfile: ${name}\n${error.stack || error.message}`,
             undefined,
@@ -973,6 +988,17 @@ class VariationalBrowserGate {
           });
           successes.push(leg);
         } catch (error) {
+          if (isBrowserUnavailableError(error)) {
+            await this.telegram.trySendMessage([
+              "[Variational Browser] reduce-only batch stopped: browser unavailable",
+              `batch_id: ${request.id || ""}`,
+              `attempt: ${attempt}/${attempts}`,
+              `leg: ${leg.variationalOrder?.symbol || "leg"}`,
+              `error: ${error.message}`,
+              "Restart the Chrome CDP process and variational-browser daemon before retrying.",
+            ].join("\n"), undefined, "reduce-only browser unavailable notice");
+            throw browserUnavailableError(error);
+          }
           if (error?.code === "NO_POSITION_FOR_REDUCE_ONLY") {
             terminalFailures.push({ leg, error });
           } else {
@@ -2512,6 +2538,23 @@ function noPositionForReduceOnlyError(symbol, cause = "") {
   const suffix = cause ? `; reduce-only unavailable: ${cause}` : "";
   const error = new Error(`No open ${symbol} position found while preparing reduce-only close${suffix}`);
   error.code = "NO_POSITION_FOR_REDUCE_ONLY";
+  return error;
+}
+
+function isBrowserUnavailableError(error) {
+  const text = [error?.message, error?.stack, error?.cause?.message].filter(Boolean).join("\n");
+  return /Target page, context or browser has been closed/i.test(text)
+    || /Target closed/i.test(text)
+    || /browser has been closed/i.test(text)
+    || /Connection closed/i.test(text)
+    || /WebSocket is not open/i.test(text)
+    || /connectOverCDP/i.test(text);
+}
+
+function browserUnavailableError(cause) {
+  const error = new Error(`browser unavailable: ${cause?.message || cause}`);
+  error.code = "BROWSER_UNAVAILABLE";
+  error.cause = cause;
   return error;
 }
 

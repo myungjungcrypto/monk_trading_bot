@@ -41,6 +41,7 @@ from backend.bot.variational.browser_requests import (
     VariationalBrowserRequestBatch,
     VariationalBrowserRequestBridge,
     completions_all_clicked,
+    completions_browser_unavailable,
     completions_close_resolved,
     completions_external_closed,
     format_completions,
@@ -150,6 +151,7 @@ class BotEngine:
         self._closing_trade_ids: set[str] = set()
         self._exit_retry_after: Dict[str, float] = {}
         self._exit_retry_cooldown_sec = float(os.getenv("VARIATIONAL_BROWSER_CLOSE_RETRY_COOLDOWN_SEC", "120"))
+        self._browser_unavailable_retry_cooldown_sec = float(os.getenv("VARIATIONAL_BROWSER_INFRA_RETRY_COOLDOWN_SEC", "900"))
         self._entry_retry_after: float = 0.0
         self._entry_retry_cooldown_sec = float(os.getenv("VARIATIONAL_BROWSER_ENTRY_RETRY_COOLDOWN_SEC", "120"))
 
@@ -806,8 +808,14 @@ class BotEngine:
                     divergence_pct=signal.divergence_pct,
                 )
                 await self._notify_variational_requests("entry", variational_entry_batch)
-                if not await self._await_variational_browser_execution("entry", variational_entry_batch):
-                    self._entry_retry_after = time.time() + self._entry_retry_cooldown_sec
+                execution_status, _ = await self._wait_variational_browser_execution_result("entry", variational_entry_batch)
+                if execution_status != "clicked":
+                    cooldown = (
+                        self._browser_unavailable_retry_cooldown_sec
+                        if execution_status == "browser_unavailable"
+                        else self._entry_retry_cooldown_sec
+                    )
+                    self._entry_retry_after = time.time() + cooldown
                     return
             except Exception as e:
                 self._entry_retry_after = time.time() + self._entry_retry_cooldown_sec
@@ -933,7 +941,12 @@ class BotEngine:
                                 self._exit_retry_after[trade_id] = time.time() + self._exit_retry_cooldown_sec
                             return
                         if execution_status != "clicked":
-                            self._exit_retry_after[trade_id] = time.time() + self._exit_retry_cooldown_sec
+                            cooldown = (
+                                self._browser_unavailable_retry_cooldown_sec
+                                if execution_status == "browser_unavailable"
+                                else self._exit_retry_cooldown_sec
+                            )
+                            self._exit_retry_after[trade_id] = time.time() + cooldown
                             return
                     except Exception as e:
                         self._exit_retry_after[trade_id] = time.time() + self._exit_retry_cooldown_sec
@@ -1059,6 +1072,19 @@ class BotEngine:
             if completions_external_closed(completions):
                 return "external_closed", summary
             return "clicked", summary
+
+        if completions_browser_unavailable(completions):
+            logger.error("Variational Browser %s unavailable:\n%s", label, summary)
+            if self.telegram:
+                await self.telegram.error(
+                    "Variational Browser unavailable",
+                    "\n".join([
+                        summary,
+                        "Chrome/CDP page was closed while processing the request.",
+                        "Restart the Chrome process opened with --remote-debugging-port=9222 and then restart variational-browser.",
+                    ]),
+                )
+            return "browser_unavailable", summary
 
         logger.warning("Variational Browser %s not executed:\n%s", label, summary)
         if self.telegram:
