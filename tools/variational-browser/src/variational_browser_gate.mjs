@@ -1554,8 +1554,44 @@ class VariationalBrowserGate {
       throw new Error(`Could not fill size input. Tried: ${this.config.orderSizeInputSelectors.join(", ")}`);
     }
 
+    const failures = [];
+    for (const point of this.orderSizeFallbackPoints()) {
+      const result = await this.tryFillOrderSizeFallbackPoint(point, quantity);
+      if (result.ok) return result.selector;
+      failures.push(result.error);
+    }
+    await this.clearPageSelection();
+    throw new Error(
+      "Size fallback points did not focus an editable input. " +
+      `${failures.join(" | ")}. ` +
+      "Refusing to press Ctrl+A because it would select the page instead of the size field.",
+    );
+  }
+
+  orderSizeFallbackPoints() {
+    const base = this.config.orderSizeFallbackPoint;
+    const candidates = [
+      base,
+      { x: 0.91, y: base.y },
+      { x: 0.93, y: base.y },
+      { x: 0.88, y: base.y },
+      { x: 0.91, y: 0.292 },
+      { x: 0.93, y: 0.292 },
+      { x: 0.948, y: 0.292 },
+      { x: 0.91, y: 0.266 },
+      { x: 0.93, y: 0.266 },
+    ];
+    const seen = new Set();
+    return candidates.filter((point) => {
+      const key = `${point.x.toFixed(3)},${point.y.toFixed(3)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return point.x > 0 && point.x < 1 && point.y > 0 && point.y < 1;
+    });
+  }
+
+  async tryFillOrderSizeFallbackPoint(point, quantity) {
     const viewport = this.page.viewportSize() || this.config.viewport;
-    const point = this.config.orderSizeFallbackPoint;
     const x = Math.round(viewport.width * point.x);
     const y = Math.round(viewport.height * point.y);
     console.log(`[Variational Browser] size input selector not found; typing via fallback point x=${x} y=${y}`);
@@ -1563,14 +1599,14 @@ class VariationalBrowserGate {
     const focus = await this.focusedEditableInfo();
     if (!focus.editable) {
       await this.clearPageSelection();
-      throw new Error(
-        `Size fallback point did not focus an editable input (active=${focus.tag || "none"} role=${focus.role || ""}). ` +
-        "Refusing to press Ctrl+A because it would select the page instead of the size field.",
-      );
+      return {
+        ok: false,
+        error: `fallback:${point.x},${point.y} active=${focus.tag || "none"} role=${focus.role || ""}`,
+      };
     }
     await this.page.keyboard.press("Control+A");
     await this.page.keyboard.type(String(quantity));
-    return `fallback:${point.x},${point.y}:${focus.tag}`;
+    return { ok: true, selector: `fallback:${point.x},${point.y}:${focus.tag}` };
   }
 
   async focusedEditableInfo() {
@@ -2020,46 +2056,45 @@ class VariationalBrowserGate {
 
   async fillFirstAvailable(selectors, value, label, timeoutMs = 3000) {
     for (const selector of selectors) {
-      const locator = this.page.locator(selector).first();
-      try {
-        await locator.waitFor({ state: "visible", timeout: timeoutMs });
-        await locator.fill(String(value), { timeout: timeoutMs });
-        return selector;
-      } catch {
-        try {
-          await locator.waitFor({ state: "visible", timeout: timeoutMs });
-          await locator.click();
-          await this.page.keyboard.press("Control+A");
-          await this.page.keyboard.type(String(value));
-          return selector;
-        } catch {
-          // Try next selector.
-        }
-      }
+      const filled = await this.fillMatchingLocator(selector, value, timeoutMs);
+      if (filled) return filled;
     }
     throw new Error(`Could not fill ${label}. Tried: ${selectors.join(", ")}`);
   }
 
   async fillFirstAvailableOptional(selectors, value, label, timeoutMs = 3000) {
     for (const selector of selectors) {
-      const locator = this.page.locator(selector).first();
-      try {
-        await locator.waitFor({ state: "visible", timeout: timeoutMs });
-        await locator.fill(String(value), { timeout: timeoutMs });
-        return selector;
-      } catch {
+      const filled = await this.fillMatchingLocator(selector, value, timeoutMs);
+      if (filled) return filled;
+    }
+    console.log(`[Variational Browser] ${label} selector not found. Tried: ${selectors.join(", ")}`);
+    return "";
+  }
+
+  async fillMatchingLocator(selector, value, timeoutMs) {
+    const scopes = [this.page, ...this.page.frames()];
+    for (const scope of scopes) {
+      const locators = await scope.locator(selector).all().catch(() => []);
+      for (const locator of locators) {
         try {
-          await locator.waitFor({ state: "visible", timeout: timeoutMs });
-          await locator.click();
-          await this.page.keyboard.press("Control+A");
-          await this.page.keyboard.type(String(value));
+          await locator.waitFor({ state: "visible", timeout: Math.min(timeoutMs, 1000) });
+          await locator.fill(String(value), { timeout: Math.min(timeoutMs, 1000) });
           return selector;
         } catch {
-          // Try next selector.
+          try {
+            await locator.waitFor({ state: "visible", timeout: Math.min(timeoutMs, 1000) });
+            await locator.click();
+            const focus = await this.focusedEditableInfo();
+            if (!focus.editable) continue;
+            await this.page.keyboard.press("Control+A");
+            await this.page.keyboard.type(String(value));
+            return `${selector}:${focus.tag || "editable"}`;
+          } catch {
+            // Try next locator.
+          }
         }
       }
     }
-    console.log(`[Variational Browser] ${label} selector not found. Tried: ${selectors.join(", ")}`);
     return "";
   }
 
