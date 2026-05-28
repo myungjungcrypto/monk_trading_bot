@@ -9,6 +9,7 @@ import {
   stopBot,
   setKillSwitch,
   manualCloseVariationalTrade,
+  forceFlattenVariational,
   reconcileExternalClose,
   createDashboardWs,
 } from "../api/client";
@@ -151,6 +152,21 @@ export default function Dashboard() {
     setLoading(false);
   };
 
+  const handleForceFlatten = async () => {
+    const ok = window.confirm(
+      "This will queue a real Variational Close All request from the live Positions table. Use only when the pair close path is stuck. Continue?"
+    );
+    if (!ok) return;
+    setLoading(true);
+    try {
+      await forceFlattenVariational("DASHBOARD_FORCE_FLATTEN", false);
+      await loadRuntimeData();
+    } catch (err) {
+      alert(err.response?.data?.detail || "Force flatten failed");
+    }
+    setLoading(false);
+  };
+
   const handleLogout = () => {
     localStorage.removeItem("token");
     navigate("/login");
@@ -228,6 +244,13 @@ export default function Dashboard() {
           >
             Reset Kill
           </button>
+          <button
+            style={styles.flattenBtn}
+            onClick={handleForceFlatten}
+            disabled={loading}
+          >
+            Force Flatten
+          </button>
         </div>
       </div>
 
@@ -235,7 +258,7 @@ export default function Dashboard() {
         <div style={styles.killBanner}>
           <strong>Emergency Kill Switch Active</strong>
           <span>
-            Bot start is blocked and Variational browser clicks are refused.
+            Bot start and normal Variational requests are blocked. Force Flatten is still allowed for emergency close-all.
             {status?.kill_switch?.reason ? ` Reason: ${status.kill_switch.reason}` : ""}
           </span>
         </div>
@@ -363,6 +386,16 @@ const styles = {
     borderRadius: "8px",
     cursor: "pointer",
     fontWeight: "600",
+    fontSize: "13px",
+  },
+  flattenBtn: {
+    padding: "8px 16px",
+    background: "#7c2d12",
+    color: "#fed7aa",
+    border: "1px solid #ea580c",
+    borderRadius: "8px",
+    cursor: "pointer",
+    fontWeight: "700",
     fontSize: "13px",
   },
   killBanner: {

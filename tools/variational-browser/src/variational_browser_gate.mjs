@@ -634,22 +634,20 @@ class VariationalBrowserGate {
 
     while (true) {
       const killSwitch = await this.readKillSwitch();
-      if (killSwitch.active) {
-        if (!this.killSwitchLogged) {
-          this.killSwitchLogged = true;
-          console.warn(`[Variational Browser] kill switch active; request processing paused: ${killSwitch.reason || ""}`);
-        }
-        await sleep(this.config.watchIntervalMs);
-        continue;
-      }
-      this.killSwitchLogged = false;
-
       const files = (await fs.promises.readdir(this.config.requestDir))
         .filter((name) => name.endsWith(".json"))
         .sort();
       for (const name of files) {
         const filePath = path.join(this.config.requestDir, name);
         try {
+          if (killSwitch.active && !(await this.isForceFlattenRequestFile(filePath))) {
+            if (!this.killSwitchLogged) {
+              this.killSwitchLogged = true;
+              console.warn(`[Variational Browser] kill switch active; request processing paused: ${killSwitch.reason || ""}`);
+            }
+            continue;
+          }
+          this.killSwitchLogged = false;
           await this.processRequestFile(filePath);
         } catch (error) {
           if (error.archivedStatus === "browser_unavailable" || isBrowserUnavailableError(error)) {
@@ -676,10 +674,23 @@ class VariationalBrowserGate {
     }
   }
 
+  async isForceFlattenRequestFile(filePath) {
+    try {
+      const raw = await fs.promises.readFile(filePath, "utf8");
+      const request = JSON.parse(raw);
+      return String(request.action || request.variationalAction || "").toLowerCase() === "flatten_positions";
+    } catch {
+      return false;
+    }
+  }
+
   async processRequest(request) {
     this.validateRequest(request);
     if (Array.isArray(request.variationalBatch)) {
       return this.processBatchRequest(request);
+    }
+    if (String(request.action || request.variationalAction || "").toLowerCase() === "flatten_positions") {
+      return this.processFlattenPositionsRequest(request);
     }
 
     const started = Date.now();
@@ -1039,6 +1050,200 @@ class VariationalBrowserGate {
     }
 
     return { successes, failures: [...terminalFailures, ...failures] };
+  }
+
+  async processFlattenPositionsRequest(request) {
+    const id = request.id || `flatten-${Date.now()}`;
+    console.log(`[Variational Browser] processing force flatten request: ${id}`);
+    if (request.url) {
+      console.log(`[Variational Browser] opening: ${request.url}`);
+      await this.page.goto(request.url, { waitUntil: "domcontentloaded" });
+    } else {
+      await this.page.goto(this.config.url, { waitUntil: "domcontentloaded" });
+    }
+    await this.page.waitForTimeout(Number(request.previewDelayMs ?? this.config.previewDelayMs));
+
+    console.log("[Variational Browser] checking wallet state...");
+    const walletState = await this.waitForRequestWalletReady();
+    console.log(`[Variational Browser] wallet stage: ${walletState.stage}`);
+    if (walletState.stage !== "ready") {
+      const notReadyPath = await this.captureScreenshot(`${id}-wallet-not-ready`);
+      await this.telegram.trySendPhoto(
+        notReadyPath,
+        [
+          "[Variational Browser] force flatten blocked: wallet not ready",
+          `id: ${id}`,
+          `stage: ${walletState.stage}`,
+          `ready_visible: ${walletState.readyVisible}`,
+          `ready_text_visible: ${walletState.readyTextVisible}`,
+          `ready_order_panel_visible: ${walletState.readyOrderPanelVisible}`,
+          `wallet_lost_visible: ${walletState.walletLostVisible}`,
+          `human_challenge_visible: ${walletState.humanChallengeVisible}`,
+        ].join("\n").slice(0, 1024),
+        undefined,
+        "force flatten wallet not ready screenshot",
+      );
+      return { status: `wallet_${walletState.stage}` };
+    }
+
+    const before = await this.readOpenPositionsSummary();
+    const beforePath = await this.captureScreenshot(`${id}-before-flatten`);
+    await this.telegram.trySendPhoto(
+      beforePath,
+      [
+        "[Variational Browser] FORCE FLATTEN PREVIEW",
+        `id: ${id}`,
+        `dry_run: ${request.dryRun ?? this.config.dryRun}`,
+        `position_count: ${before.count}`,
+        "positions:",
+        ...(before.rows.length ? before.rows.map((row) => `- ${row}`) : ["- none"]),
+        request.summary ? `summary: ${request.summary}` : "",
+      ].filter(Boolean).join("\n").slice(0, 1024),
+      undefined,
+      "force flatten preview",
+    );
+
+    if (before.count <= 0) {
+      return { status: "external_closed" };
+    }
+    if (request.dryRun ?? this.config.dryRun) {
+      await this.telegram.trySendMessage(
+        `[Variational Browser] force flatten dry-run, click skipped\nid: ${id}`,
+        undefined,
+        "force flatten dry-run notice",
+      );
+      return { status: "dryrun" };
+    }
+
+    if (!request.ignoreKillSwitch) {
+      await this.assertKillSwitchClear("force flatten");
+    }
+    const firstClick = await this.clickForceFlattenControl();
+    console.log(`[Variational Browser] force flatten control clicked: ${firstClick}`);
+    await this.page.waitForTimeout(this.config.flattenConfirmDelayMs);
+
+    const confirmClick = await this.clickForceFlattenConfirmIfVisible();
+    if (confirmClick) {
+      console.log(`[Variational Browser] force flatten confirm clicked: ${confirmClick}`);
+    }
+
+    await this.page.waitForTimeout(Number(request.afterClickDelayMs ?? this.config.afterClickDelayMs));
+    const after = await this.readOpenPositionsSummary();
+    const afterPath = await this.captureScreenshot(`${id}-after-flatten`);
+    await this.telegram.trySendPhoto(
+      afterPath,
+      [
+        "[Variational Browser] FORCE FLATTEN RESULT",
+        `id: ${id}`,
+        `initial_click: ${firstClick}`,
+        `confirm_click: ${confirmClick || "none"}`,
+        `position_count: ${after.count}`,
+        "positions:",
+        ...(after.rows.length ? after.rows.map((row) => `- ${row}`) : ["- none"]),
+      ].join("\n").slice(0, 1024),
+      undefined,
+      "force flatten result",
+    );
+
+    return { status: after.count <= 0 ? "clicked" : "partial_failed" };
+  }
+
+  async clickForceFlattenControl() {
+    const selector = await this.clickFirstAvailableOptional(
+      this.config.flattenCloseAllSelectors,
+      "force flatten close all",
+      this.config.flattenSelectorTimeoutMs,
+    );
+    if (selector) return `selector:${selector}`;
+
+    const clicked = await this.clickVisibleTextControl(/^\s*Close\s+All\s*$/i, "Close All");
+    if (clicked) return clicked;
+    throw new Error(`Could not find force flatten Close All control. Tried: ${this.config.flattenCloseAllSelectors.join(", ")}`);
+  }
+
+  async clickForceFlattenConfirmIfVisible() {
+    const selector = await this.clickFirstAvailableOptional(
+      this.config.flattenConfirmSelectors,
+      "force flatten confirm",
+      this.config.flattenConfirmTimeoutMs,
+    );
+    if (selector) return `selector:${selector}`;
+
+    return await this.clickVisibleTextControl(/^\s*(Confirm|Close\s+All|Close\s+Positions|Market\s+Close|Yes)\s*$/i, "flatten confirm");
+  }
+
+  async clickVisibleTextControl(pattern, label) {
+    const source = String(pattern.source || pattern);
+    const flags = pattern.ignoreCase ? "i" : "";
+    const target = await this.page.evaluate(({ source, flags }) => {
+      const regex = new RegExp(source, flags);
+      const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+      const visible = (node) => {
+        if (!node || !(node instanceof Element)) return false;
+        const rect = node.getBoundingClientRect();
+        const style = window.getComputedStyle(node);
+        if (rect.width <= 1 || rect.height <= 1) return false;
+        if (style.visibility === "hidden" || style.display === "none") return false;
+        if (Number(style.opacity || "1") <= 0.01) return false;
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        return centerX >= 0 && centerY >= 0 && centerX <= window.innerWidth && centerY <= window.innerHeight;
+      };
+      const candidates = Array.from(document.querySelectorAll("button,[role='button'],a,div,span"))
+        .filter(visible)
+        .map((node) => {
+          const rect = node.getBoundingClientRect();
+          const ownText = normalize(Array.from(node.childNodes || [])
+            .filter((child) => child.nodeType === Node.TEXT_NODE)
+            .map((child) => child.textContent || "")
+            .join(" "));
+          const text = ownText || normalize(node.innerText || node.textContent || node.getAttribute("aria-label"));
+          const disabled = Boolean(
+            node.disabled
+            || node.getAttribute("aria-disabled") === "true"
+            || node.closest?.("[disabled],[aria-disabled='true']")
+          );
+          let score = 0;
+          if (regex.test(text)) score += 100;
+          if ((node.tagName || "").toLowerCase() === "button") score += 20;
+          if (node.getAttribute("role") === "button") score += 15;
+          if (disabled) score -= 200;
+          score -= Math.abs((rect.left + rect.width / 2) - window.innerWidth / 2) / 100;
+          return {
+            text,
+            disabled,
+            score,
+            x: rect.left + rect.width / 2,
+            y: rect.top + rect.height / 2,
+          };
+        })
+        .filter((item) => item.score > 0 && !item.disabled)
+        .sort((a, b) => b.score - a.score);
+      return candidates[0] || null;
+    }, { source, flags });
+
+    if (!target) return "";
+    console.log(`[Variational Browser] clicking ${label} by visible text "${target.text}" at x=${Math.round(target.x)} y=${Math.round(target.y)}`);
+    await this.page.mouse.click(Math.round(target.x), Math.round(target.y));
+    return `text:${label}:${Math.round(target.x)},${Math.round(target.y)}`;
+  }
+
+  async readOpenPositionsSummary() {
+    return this.page.evaluate(() => {
+      const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+      const text = document.body?.innerText || "";
+      const countMatch = text.match(/Positions\s*\((\d+)\)/i);
+      let count = countMatch ? Number(countMatch[1]) : 0;
+      const lines = text.split(/\n+/).map(normalize).filter(Boolean);
+      const rows = [];
+      for (let i = 0; i < lines.length; i += 1) {
+        if (!/\b(BTC|ETH)-PERP\b/i.test(lines[i])) continue;
+        rows.push(lines.slice(i, Math.min(i + 8, lines.length)).join(" | "));
+      }
+      if (!count && rows.length) count = rows.length;
+      if (/No positions/i.test(text) && !rows.length) count = 0;
+      return { count: Number.isFinite(count) ? count : rows.length, rows };
+    }).catch(() => ({ count: 0, rows: [] }));
   }
 
   async prepareRequestPreview(request, screenshotId) {
@@ -2582,6 +2787,26 @@ function loadConfig() {
     reduceOnlyFallbackPoint: parsePoint(env("VARIATIONAL_BROWSER_REDUCE_ONLY_FALLBACK_POINT", "0.768,0.340")),
     requireReduceOnlyChecked: envBool("VARIATIONAL_BROWSER_REQUIRE_REDUCE_ONLY_CHECKED", true),
     reduceOnlyQuantitySafetyBps: Number(env("VARIATIONAL_BROWSER_REDUCE_ONLY_QUANTITY_SAFETY_BPS", "1")),
+    flattenCloseAllSelectors: envList("VARIATIONAL_BROWSER_FLATTEN_CLOSE_ALL_SELECTORS", [
+      'button:has-text("Close All")',
+      '[role="button"]:has-text("Close All")',
+      'text=/^Close All$/i',
+    ]),
+    flattenConfirmSelectors: envList("VARIATIONAL_BROWSER_FLATTEN_CONFIRM_SELECTORS", [
+      'button:has-text("Confirm")',
+      '[role="button"]:has-text("Confirm")',
+      'button:has-text("Close All")',
+      '[role="button"]:has-text("Close All")',
+      'button:has-text("Close Positions")',
+      '[role="button"]:has-text("Close Positions")',
+      'button:has-text("Market Close")',
+      '[role="button"]:has-text("Market Close")',
+      'button:has-text("Yes")',
+      '[role="button"]:has-text("Yes")',
+    ]),
+    flattenSelectorTimeoutMs: Number(env("VARIATIONAL_BROWSER_FLATTEN_SELECTOR_TIMEOUT_MS", "3000")),
+    flattenConfirmTimeoutMs: Number(env("VARIATIONAL_BROWSER_FLATTEN_CONFIRM_TIMEOUT_MS", "3000")),
+    flattenConfirmDelayMs: Number(env("VARIATIONAL_BROWSER_FLATTEN_CONFIRM_DELAY_MS", "1200")),
     confirmCandidateMinXRatio: Number(env("VARIATIONAL_BROWSER_CONFIRM_CANDIDATE_MIN_X_RATIO", "0.70")),
     confirmCandidateMinYRatio: Number(env("VARIATIONAL_BROWSER_CONFIRM_CANDIDATE_MIN_Y_RATIO", "0.30")),
     confirmCandidateMaxYRatio: Number(env("VARIATIONAL_BROWSER_CONFIRM_CANDIDATE_MAX_Y_RATIO", "0.60")),
@@ -2647,6 +2872,7 @@ function parseArgs() {
     connectWallet: args.includes("--connect-wallet"),
     authenticate: args.includes("--authenticate"),
     resetWalletSession: args.includes("--reset-wallet-session"),
+    flattenPositions: args.includes("--flatten-positions"),
     status: args.includes("--status"),
     request: get("--request"),
     selector: get("--selector"),
@@ -2725,6 +2951,15 @@ async function run() {
       await gate.authenticateCurrentPage();
     } else if (args.resetWalletSession) {
       await gate.resetWalletSession();
+    } else if (args.flattenPositions) {
+      await gate.processRequest({
+        id: `manual-flatten-${Date.now()}`,
+        action: "flatten_positions",
+        url: args.url || config.url,
+        summary: "Manual force flatten from CLI",
+        dryRun: config.dryRun,
+        maxAgeSec: 0,
+      });
     } else if (args.status) {
       await gate.statusCurrentPage();
     } else if (args.request) {
@@ -2739,6 +2974,7 @@ async function run() {
       console.log("  npm start -- --connect-wallet");
       console.log("  npm start -- --authenticate");
       console.log("  npm start -- --reset-wallet-session");
+      console.log("  npm start -- --flatten-positions");
       console.log("  npm start -- --status");
       console.log("  npm start -- --approve-click --selector 'button:has-text(\"Submit\")'");
       console.log("  npm start -- --request runtime/requests/order.json");

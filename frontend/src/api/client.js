@@ -54,6 +54,8 @@ export const manualCloseVariationalTrade = (
   reason = "MANUAL_CLOSE",
   force = false,
 ) => api.post("/api/bot/manual-close", { trade_id, reason, force });
+export const forceFlattenVariational = (reason = "FORCE_FLATTEN", dry_run = null) =>
+  api.post("/api/bot/force-flatten-variational", { reason, dry_run });
 export const reconcileExternalClose = (trade_id = null, reason = "EXTERNAL_MANUAL_CLOSE") =>
   api.post("/api/bot/reconcile-external-close", { trade_id, reason });
 export const testTelegram = () => api.post("/api/bot/test-telegram");

@@ -15,6 +15,7 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -108,6 +109,42 @@ def _write_kill_switch(*, active: bool, reason: str = "", updated_by: str = "") 
     }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return {**payload, "path": str(path)}
+
+
+def _variational_request_dir() -> Path:
+    configured = os.getenv("VARIATIONAL_BROWSER_REQUEST_DIR")
+    if configured:
+        path = Path(configured).expanduser()
+        return path if path.is_absolute() else PROJECT_ROOT / path
+    return PROJECT_ROOT / "tools" / "variational-browser" / "runtime" / "requests"
+
+
+def _write_force_flatten_request(*, reason: str, requested_by: str, dry_run: Optional[bool]) -> Dict[str, Any]:
+    request_dir = _variational_request_dir()
+    request_dir.mkdir(parents=True, exist_ok=True)
+    created_at = datetime.now(timezone.utc)
+    request_id = f"variational-flatten-{created_at.strftime('%Y%m%dT%H%M%S')}-{int(time.time() * 1000) % 100000:05d}"
+    base_url = os.getenv("VARIATIONAL_BROWSER_BASE_URL", os.getenv("VARIATIONAL_BROWSER_URL", "https://omni.variational.io")).rstrip("/")
+    payload: Dict[str, Any] = {
+        "id": request_id,
+        "createdAt": created_at.isoformat(),
+        "action": "flatten_positions",
+        "url": f"{base_url}/perpetual/BTC",
+        "summary": "\n".join([
+            "Force flatten all open Variational positions",
+            f"reason: {reason}",
+            f"requested_by: {requested_by}",
+        ]),
+        "confirmSelector": "auto",
+        "ignoreKillSwitch": True,
+        "maxAgeSec": int(os.getenv("VARIATIONAL_BROWSER_FORCE_FLATTEN_MAX_AGE_SEC", "300")),
+    }
+    if dry_run is not None:
+        payload["dryRun"] = bool(dry_run)
+
+    path = request_dir / f"{request_id}.json"
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return {"request_id": request_id, "path": str(path), "dry_run": payload.get("dryRun")}
 
 
 # ── Lifespan ─────────────────────────────────────────────
@@ -227,6 +264,11 @@ class ManualCloseRequest(BaseModel):
     engine_trade_id: Optional[str] = None
     reason: Optional[str] = "MANUAL_CLOSE"
     force: bool = False
+
+
+class ForceFlattenRequest(BaseModel):
+    reason: Optional[str] = "FORCE_FLATTEN"
+    dry_run: Optional[bool] = None
 
 
 async def _auto_resume_open_trades(session_factory) -> None:
@@ -617,6 +659,28 @@ async def bot_manual_close(
         user.username, req.trade_id, req.engine_trade_id, result,
     )
     return result
+
+
+@app.post("/api/bot/force-flatten-variational")
+async def bot_force_flatten_variational(
+    req: ForceFlattenRequest,
+    user: TokenData = Depends(get_current_user),
+):
+    """
+    Queue an emergency browser request that clicks Variational's Close All
+    control based on the live web Positions table.
+    """
+    reason = (req.reason or "FORCE_FLATTEN").strip()[:80] or "FORCE_FLATTEN"
+    result = _write_force_flatten_request(
+        reason=reason,
+        requested_by=user.username,
+        dry_run=req.dry_run,
+    )
+    logger.warning(
+        "Force Variational flatten requested by %s: path=%s reason=%s dry_run=%s",
+        user.username, result["path"], reason, req.dry_run,
+    )
+    return {"status": "queued", **result}
 
 
 @app.post("/api/bot/reconcile-external-close")
