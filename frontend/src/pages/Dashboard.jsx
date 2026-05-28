@@ -8,6 +8,7 @@ import {
   startBot,
   stopBot,
   setKillSwitch,
+  manualCloseVariationalTrade,
   reconcileExternalClose,
   createDashboardWs,
 } from "../api/client";
@@ -135,6 +136,21 @@ export default function Dashboard() {
     setLoading(false);
   };
 
+  const handleManualClose = async (tradeId) => {
+    const ok = window.confirm(
+      `This will queue a real reduce-only Variational close for DB trade #${tradeId}. Continue?`
+    );
+    if (!ok) return;
+    setLoading(true);
+    try {
+      await manualCloseVariationalTrade(tradeId, "MANUAL_DASHBOARD_CLOSE", true);
+      await loadRuntimeData();
+    } catch (err) {
+      alert(err.response?.data?.detail || "Manual close failed");
+    }
+    setLoading(false);
+  };
+
   const handleLogout = () => {
     localStorage.removeItem("token");
     navigate("/login");
@@ -237,7 +253,11 @@ export default function Dashboard() {
       <SpreadChart data={spreadData} />
 
       {/* Trades Table */}
-      <PositionTable trades={trades} onReconcileExternalClose={handleReconcileExternalClose} />
+      <PositionTable
+        trades={trades}
+        onManualClose={handleManualClose}
+        onReconcileExternalClose={handleReconcileExternalClose}
+      />
     </div>
   );
 }

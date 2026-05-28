@@ -415,6 +415,86 @@ class BotEngine:
             )
         return {"closed": closed}
 
+    async def request_manual_close(
+        self,
+        db_trade_id: Optional[int] = None,
+        engine_trade_id: Optional[str] = None,
+        reason: str = "MANUAL_CLOSE",
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """Queue the normal close path for an open Variational/browser trade."""
+        open_trades = list(self.position_manager.open_trades.items())
+        if not open_trades:
+            raise ValueError("No open in-memory bot position is available to close")
+
+        selected_trade_id: Optional[str] = None
+        if engine_trade_id:
+            if engine_trade_id not in self.position_manager.open_trades:
+                raise ValueError(f"Open bot position not found: {engine_trade_id}")
+            selected_trade_id = engine_trade_id
+        elif db_trade_id is not None:
+            selected_trade_id = next(
+                (tid for tid, mapped_db_id in self._trade_db_ids.items() if mapped_db_id == db_trade_id),
+                None,
+            )
+            if selected_trade_id is None:
+                if len(open_trades) == 1:
+                    selected_trade_id = open_trades[0][0]
+                    logger.warning(
+                        "DB trade %s is not mapped to a bot trade; using sole open trade %s for manual close",
+                        db_trade_id,
+                        selected_trade_id,
+                    )
+                else:
+                    raise ValueError(f"Open Variational DB trade is not attached to the bot: {db_trade_id}")
+        elif len(open_trades) == 1:
+            selected_trade_id = open_trades[0][0]
+        else:
+            choices = ", ".join(
+                f"db={self._trade_db_ids.get(tid, '?')} engine={tid}"
+                for tid, _ in open_trades
+            )
+            raise ValueError(f"Multiple open bot positions exist; specify trade_id. Choices: {choices}")
+
+        if selected_trade_id in self._closing_trade_ids:
+            return {
+                "status": "already_closing",
+                "trade_id": selected_trade_id,
+                "db_trade_id": self._trade_db_ids.get(selected_trade_id),
+            }
+
+        now = time.time()
+        retry_after = self._exit_retry_after.get(selected_trade_id, 0.0)
+        if retry_after > now and not force:
+            return {
+                "status": "retry_suppressed",
+                "trade_id": selected_trade_id,
+                "db_trade_id": self._trade_db_ids.get(selected_trade_id),
+                "retry_after_sec": round(retry_after - now, 1),
+            }
+        if force:
+            self._exit_retry_after.pop(selected_trade_id, None)
+
+        message = (reason or "MANUAL_CLOSE").strip()[:120] or "MANUAL_CLOSE"
+        task = asyncio.create_task(
+            self._handle_exit(selected_trade_id, ExitReason.MANUAL, message)
+        )
+
+        def _log_manual_close_task(done_task: asyncio.Task) -> None:
+            try:
+                done_task.result()
+            except Exception:
+                logger.exception("Manual Variational close task failed for %s", selected_trade_id)
+
+        task.add_done_callback(_log_manual_close_task)
+        return {
+            "status": "queued",
+            "trade_id": selected_trade_id,
+            "db_trade_id": self._trade_db_ids.get(selected_trade_id),
+            "reason": message,
+            "force": force,
+        }
+
     @staticmethod
     def _datetime_to_timestamp(value) -> float:
         if isinstance(value, datetime):

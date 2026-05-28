@@ -49,6 +49,11 @@ export const startBot = (
 export const stopBot = () => api.post("/api/bot/stop");
 export const setKillSwitch = (active = true, reason = "") =>
   api.post("/api/bot/kill-switch", { active, reason });
+export const manualCloseVariationalTrade = (
+  trade_id = null,
+  reason = "MANUAL_CLOSE",
+  force = false,
+) => api.post("/api/bot/manual-close", { trade_id, reason, force });
 export const reconcileExternalClose = (trade_id = null, reason = "EXTERNAL_MANUAL_CLOSE") =>
   api.post("/api/bot/reconcile-external-close", { trade_id, reason });
 export const testTelegram = () => api.post("/api/bot/test-telegram");

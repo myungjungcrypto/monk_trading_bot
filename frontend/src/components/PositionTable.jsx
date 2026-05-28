@@ -1,4 +1,4 @@
-export default function PositionTable({ trades, onReconcileExternalClose }) {
+export default function PositionTable({ trades, onManualClose, onReconcileExternalClose }) {
   if (!trades || trades.length === 0) {
     return <div style={styles.empty}>No trades yet</div>;
   }
@@ -64,12 +64,20 @@ export default function PositionTable({ trades, onReconcileExternalClose }) {
                   </td>
                   <td style={styles.td}>
                     {canReconcile ? (
-                      <button
-                        style={styles.reconcileBtn}
-                        onClick={() => onReconcileExternalClose?.(t.id)}
-                      >
-                        Clear External
-                      </button>
+                      <div style={styles.actionGroup}>
+                        <button
+                          style={styles.closeBtn}
+                          onClick={() => onManualClose?.(t.id)}
+                        >
+                          Close Now
+                        </button>
+                        <button
+                          style={styles.reconcileBtn}
+                          onClick={() => onReconcileExternalClose?.(t.id)}
+                        >
+                          Clear External
+                        </button>
+                      </div>
                     ) : "-"}
                   </td>
                 </tr>
@@ -113,6 +121,20 @@ const styles = {
     padding: "8px 12px",
     borderBottom: "1px solid #1f2233",
     whiteSpace: "nowrap",
+  },
+  actionGroup: {
+    display: "flex",
+    gap: "6px",
+  },
+  closeBtn: {
+    padding: "6px 10px",
+    background: "#1e3a8a",
+    color: "#bfdbfe",
+    border: "1px solid #2563eb",
+    borderRadius: "6px",
+    cursor: "pointer",
+    fontSize: "12px",
+    fontWeight: 600,
   },
   reconcileBtn: {
     padding: "6px 10px",

@@ -220,6 +220,15 @@ class ReconcileExternalCloseRequest(BaseModel):
     pnl_usd: float = 0.0
 
 
+class ManualCloseRequest(BaseModel):
+    # Dashboard trade id / DB id. If omitted and only one bot position is open,
+    # the backend will close that position.
+    trade_id: Optional[int] = None
+    engine_trade_id: Optional[str] = None
+    reason: Optional[str] = "MANUAL_CLOSE"
+    force: bool = False
+
+
 async def _auto_resume_open_trades(session_factory) -> None:
     """백엔드 재시작 시 열린 DB 거래가 있으면 봇을 자동 재시작합니다."""
     enabled = os.getenv("AUTO_RESUME_OPEN_TRADES", "true").lower() not in {"0", "false", "no"}
@@ -579,6 +588,35 @@ async def bot_kill_switch(
 
     logger.info("Emergency kill switch cleared by %s", user.username)
     return {"status": "cleared", "kill_switch": state}
+
+
+@app.post("/api/bot/manual-close")
+async def bot_manual_close(
+    req: ManualCloseRequest,
+    user: TokenData = Depends(get_current_user),
+):
+    """Queue the real Variational reduce-only close path for an open bot position."""
+    if _bot_engine is None or not _bot_engine.is_running:
+        raise HTTPException(400, "Bot is not running")
+    if getattr(_bot_engine, "execution_mode", "") != "variational_browser":
+        raise HTTPException(400, "Manual close is only available in variational_browser mode")
+
+    reason = (req.reason or "MANUAL_CLOSE").strip()[:50] or "MANUAL_CLOSE"
+    try:
+        result = await _bot_engine.request_manual_close(
+            db_trade_id=req.trade_id,
+            engine_trade_id=req.engine_trade_id,
+            reason=reason,
+            force=bool(req.force),
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    logger.warning(
+        "Manual Variational close requested by %s: trade_id=%s engine_trade_id=%s result=%s",
+        user.username, req.trade_id, req.engine_trade_id, result,
+    )
+    return result
 
 
 @app.post("/api/bot/reconcile-external-close")
