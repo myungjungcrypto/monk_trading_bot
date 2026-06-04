@@ -347,9 +347,12 @@ class VariationalBrowserGate {
   }
 
   async connectWallet() {
+    console.log(`[Variational Browser] connect-wallet: opening ${this.config.url}`);
     await this.page.goto(this.config.url, { waitUntil: "domcontentloaded" });
     await this.page.waitForTimeout(this.config.previewDelayMs);
+    console.log("[Variational Browser] connect-wallet: assessing initial wallet state");
     const initialState = await this.waitForInitialWalletState();
+    console.log(`[Variational Browser] connect-wallet: initial wallet stage=${initialState.stage}`);
     if (initialState.stage === "ready") {
       const screenshotPath = await this.captureScreenshot(`walletconnect-ready-${Date.now()}`);
       await this.telegram.sendPhoto(
@@ -377,15 +380,20 @@ class VariationalBrowserGate {
       return { status: initialState.stage };
     }
 
+    console.log("[Variational Browser] connect-wallet: clicking Connect Wallet");
     await this.clickFirstAvailable(this.config.connectWalletSelectors, "connect wallet");
     await this.page.waitForTimeout(1000);
+    console.log("[Variational Browser] connect-wallet: clicking WalletConnect");
     await this.clickFirstAvailable(this.config.walletConnectSelectors, "walletconnect");
     await this.page.waitForTimeout(2000);
 
+    console.log("[Variational Browser] connect-wallet: capturing WalletConnect modal");
     const screenshotPath = await this.captureScreenshot(`walletconnect-${Date.now()}`);
+    console.log("[Variational Browser] connect-wallet: extracting WalletConnect URI");
     const uri = await this.extractWalletConnectUri();
     if (uri) {
       const uriPath = path.join(this.config.runtimeDir, "walletconnect_uri.txt");
+      console.log(`[Variational Browser] connect-wallet: URI found; writing ${uriPath}`);
       await fs.promises.writeFile(uriPath, `${uri}\n`, { mode: 0o600 });
       await this.telegram.sendPhoto(
         screenshotPath,
@@ -405,6 +413,7 @@ class VariationalBrowserGate {
         "Keep this browser process running, then run the variational-wallet command in another SSH terminal.",
         "After the session is approved, this process will click the authenticate/login button if it appears.",
       ].join("\n"));
+      console.log("[Variational Browser] connect-wallet: waiting for wallet ready after URI handoff");
       const connected = await this.waitForWalletReady();
       const afterPath = await this.captureScreenshot(`walletconnect-after-${Date.now()}`);
       await this.telegram.sendPhoto(
