@@ -2213,11 +2213,13 @@ class VariationalBrowserGate {
       stage = "human_verification_required";
     } else if (walletLostVisible) {
       stage = "reconnect_required";
+    } else if (authenticateVisible) {
+      stage = "auth_required";
     } else if (readyVisible || readyTextVisible || readyOrderPanelVisible) {
       stage = "ready";
     } else if (connectWalletVisible) {
       stage = "disconnected";
-    } else if (authenticateVisible || walletPromptVisible) {
+    } else if (walletPromptVisible) {
       stage = "auth_required";
     }
     return {
