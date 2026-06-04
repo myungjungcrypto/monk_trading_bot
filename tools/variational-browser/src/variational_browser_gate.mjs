@@ -310,8 +310,24 @@ class VariationalBrowserGate {
     this.page = this.context.pages()[0] || await this.context.newPage();
     this.page.setDefaultTimeout(this.config.actionTimeoutMs);
     this.page.setDefaultNavigationTimeout(this.config.navigationTimeoutMs);
+    await this.grantClipboardPermissions();
     await this.applyViewportSize("startup");
     console.log(`[Variational Browser] browser ready pages=${this.context.pages().length}`);
+  }
+
+  async grantClipboardPermissions() {
+    const origins = [...new Set([
+      this.config.variationalBaseUrl,
+      new URL(this.config.url).origin,
+    ].filter(Boolean))];
+    for (const origin of origins) {
+      try {
+        await this.context.grantPermissions(["clipboard-read", "clipboard-write"], { origin });
+        console.log(`[Variational Browser] clipboard permissions granted for ${origin}`);
+      } catch (error) {
+        console.warn(`[Variational Browser] clipboard permission grant failed for ${origin}: ${error.message}`);
+      }
+    }
   }
 
   async stop() {
@@ -2472,22 +2488,86 @@ class VariationalBrowserGate {
       const locator = this.page.locator(selector).first();
       try {
         await locator.waitFor({ state: "visible", timeout: 3000 });
+        console.log(`[Variational Browser] WalletConnect copy selector found: ${selector}`);
         await locator.click();
         await this.page.waitForTimeout(500);
-        const clipboardText = await this.page.evaluate(async () => {
-          try {
-            return await navigator.clipboard.readText();
-          } catch {
-            return "";
-          }
-        });
+        const clipboardText = await this.readClipboardText();
         const uri = findWalletConnectUri(clipboardText);
         if (uri) return uri;
+        console.log(`[Variational Browser] WalletConnect copy selector clicked but clipboard did not contain wc URI: ${selector}`);
       } catch {
         // Try next copy selector.
       }
     }
+
+    const clickedByText = await this.clickWalletConnectCopyLinkByText();
+    if (clickedByText) {
+      await this.page.waitForTimeout(500);
+      const clipboardText = await this.readClipboardText();
+      const uri = findWalletConnectUri(clipboardText);
+      if (uri) return uri;
+      console.log("[Variational Browser] WalletConnect Copy link clicked by text fallback, but clipboard did not contain wc URI");
+    }
     return "";
+  }
+
+  async readClipboardText() {
+    return this.page.evaluate(async () => {
+      try {
+        return await navigator.clipboard.readText();
+      } catch (error) {
+        return `__CLIPBOARD_READ_FAILED__ ${error?.name || ""} ${error?.message || ""}`;
+      }
+    }).catch((error) => `__CLIPBOARD_EVALUATE_FAILED__ ${error?.message || ""}`);
+  }
+
+  async clickWalletConnectCopyLinkByText() {
+    const target = await this.page.evaluate(() => {
+      const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+      const visible = (node) => {
+        if (!node || !(node instanceof Element)) return false;
+        const rect = node.getBoundingClientRect();
+        const style = window.getComputedStyle(node);
+        return rect.width > 1
+          && rect.height > 1
+          && style.visibility !== "hidden"
+          && style.display !== "none"
+          && Number(style.opacity || "1") > 0.01;
+      };
+      const walk = (root, output = []) => {
+        for (const node of root.querySelectorAll("*")) {
+          output.push(node);
+          if (node.shadowRoot) walk(node.shadowRoot, output);
+        }
+        return output;
+      };
+      const candidates = walk(document)
+        .filter(visible)
+        .map((node) => {
+          const rect = node.getBoundingClientRect();
+          const text = normalize(node.innerText || node.textContent || node.getAttribute("aria-label") || node.getAttribute("title"));
+          let score = 0;
+          if (/^copy link$/i.test(text)) score += 100;
+          else if (/copy link/i.test(text)) score += 50;
+          if ((node.tagName || "").toLowerCase() === "button") score += 20;
+          if (node.getAttribute("role") === "button") score += 15;
+          if (node.closest?.("[disabled],[aria-disabled='true']")) score -= 200;
+          return {
+            text,
+            score,
+            x: rect.left + rect.width / 2,
+            y: rect.top + rect.height / 2,
+          };
+        })
+        .filter((item) => item.score > 0)
+        .sort((a, b) => b.score - a.score);
+      return candidates[0] || null;
+    });
+
+    if (!target) return "";
+    console.log(`[Variational Browser] WalletConnect Copy link text fallback at x=${Math.round(target.x)} y=${Math.round(target.y)} text="${target.text}"`);
+    await this.page.mouse.click(Math.round(target.x), Math.round(target.y));
+    return "text-fallback:Copy link";
   }
 
   async captureScreenshot(id) {
