@@ -451,6 +451,62 @@ class VariationalBrowserGate {
     return { status: "uri_not_found", screenshotPath };
   }
 
+  async ensureWalletReadyForRequest(request, context = "request") {
+    let walletState = await this.waitForRequestWalletReady();
+    if (walletState.stage === "ready") return walletState;
+
+    if (!this.config.requestAutoReconnectWallet || !this.isRecoverableWalletStage(walletState.stage)) {
+      return walletState;
+    }
+
+    await this.telegram.trySendMessage([
+      "[Variational Browser] wallet not ready; attempting automatic recovery",
+      `id: ${request.id || ""}`,
+      `context: ${context}`,
+      `stage: ${walletState.stage}`,
+      "The current request will be revalidated after reconnect before any live click.",
+    ].join("\n"), undefined, "wallet auto-recovery start");
+
+    try {
+      if (walletState.stage === "disconnected") {
+        await this.connectWallet();
+      } else if (walletState.stage === "auth_required") {
+        await this.authenticateCurrentPage({ alreadyLoaded: true });
+      }
+    } catch (error) {
+      await this.telegram.trySendMessage([
+        "[Variational Browser] wallet automatic recovery failed",
+        `id: ${request.id || ""}`,
+        `context: ${context}`,
+        `error: ${error.message}`,
+      ].join("\n"), undefined, "wallet auto-recovery failure");
+      return walletState;
+    }
+
+    // Re-check request age after recovery. If reconnect took too long, do not
+    // place an old entry at stale decision prices.
+    this.validateRequest(request);
+
+    if (request.url) {
+      console.log(`[Variational Browser] reopening request page after wallet recovery: ${request.url}`);
+      await this.page.goto(request.url, { waitUntil: "domcontentloaded" });
+      await this.page.waitForTimeout(Number(request.previewDelayMs ?? this.config.previewDelayMs));
+    }
+
+    walletState = await this.waitForRequestWalletReady();
+    await this.telegram.trySendMessage([
+      "[Variational Browser] wallet automatic recovery result",
+      `id: ${request.id || ""}`,
+      `context: ${context}`,
+      `stage: ${walletState.stage}`,
+    ].join("\n"), undefined, "wallet auto-recovery result");
+    return walletState;
+  }
+
+  isRecoverableWalletStage(stage) {
+    return ["disconnected", "auth_required"].includes(String(stage || ""));
+  }
+
   async authenticateCurrentPage({ alreadyLoaded = false } = {}) {
     if (!alreadyLoaded) {
       await this.page.goto(this.config.url, { waitUntil: "domcontentloaded" });
@@ -731,7 +787,7 @@ class VariationalBrowserGate {
     await this.page.waitForTimeout(Number(request.previewDelayMs ?? this.config.previewDelayMs));
 
     console.log("[Variational Browser] checking wallet state...");
-    const walletState = await this.waitForRequestWalletReady();
+    const walletState = await this.ensureWalletReadyForRequest(request, "single request");
     console.log(`[Variational Browser] wallet stage: ${walletState.stage}`);
     if (walletState.stage !== "ready") {
       const notReadyPath = await this.captureScreenshot(`${request.id || "request"}-wallet-not-ready`);
@@ -1091,7 +1147,7 @@ class VariationalBrowserGate {
     await this.page.waitForTimeout(Number(request.previewDelayMs ?? this.config.previewDelayMs));
 
     console.log("[Variational Browser] checking wallet state...");
-    const walletState = await this.waitForRequestWalletReady();
+    const walletState = await this.ensureWalletReadyForRequest(request, "order panel");
     console.log(`[Variational Browser] wallet stage: ${walletState.stage}`);
     if (walletState.stage !== "ready") {
       const notReadyPath = await this.captureScreenshot(`${id}-wallet-not-ready`);
@@ -1292,7 +1348,7 @@ class VariationalBrowserGate {
     await this.page.waitForTimeout(Number(request.previewDelayMs ?? this.config.previewDelayMs));
 
     console.log("[Variational Browser] checking wallet state...");
-    const walletState = await this.waitForRequestWalletReady();
+    const walletState = await this.ensureWalletReadyForRequest(request, "force flatten");
     console.log(`[Variational Browser] wallet stage: ${walletState.stage}`);
     if (walletState.stage !== "ready") {
       throw new Error(`wallet not ready: ${walletState.stage}`);
@@ -1303,7 +1359,7 @@ class VariationalBrowserGate {
       await this.setupVariationalOrder(request.variationalOrder);
       await this.page.waitForTimeout(Number(request.previewDelayMs ?? this.config.previewDelayMs));
       console.log("[Variational Browser] rechecking wallet state after order setup...");
-      const postSetupState = await this.waitForRequestWalletReady();
+      const postSetupState = await this.ensureWalletReadyForRequest(request, "after order setup");
       console.log(`[Variational Browser] wallet stage after setup: ${postSetupState.stage}`);
       if (postSetupState.stage !== "ready") {
         throw new Error(`wallet not ready after order setup: ${postSetupState.stage}`);
@@ -2767,6 +2823,7 @@ function loadConfig() {
     stateSettleMs: Number(env("VARIATIONAL_BROWSER_STATE_SETTLE_SEC", "8")) * 1000,
     requestWalletReadyWaitMs: Number(env("VARIATIONAL_BROWSER_REQUEST_WALLET_READY_WAIT_SEC", "15")) * 1000,
     requestAutoAuthenticate: envBool("VARIATIONAL_BROWSER_REQUEST_AUTO_AUTHENTICATE", true),
+    requestAutoReconnectWallet: envBool("VARIATIONAL_BROWSER_REQUEST_AUTO_RECONNECT_WALLET", true),
     watchIntervalMs: Number(env("VARIATIONAL_BROWSER_WATCH_INTERVAL_MS", "1000")),
     maxRequestAgeSec: Number(env("VARIATIONAL_BROWSER_MAX_REQUEST_AGE_SEC", "60")),
     viewport: parseViewport(env("VARIATIONAL_BROWSER_VIEWPORT", "1440x1200")),
