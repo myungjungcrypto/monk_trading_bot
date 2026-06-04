@@ -427,6 +427,10 @@ def completions_browser_unavailable(completions: List[VariationalBrowserRequestC
     return bool(completions) and any(completion.status == "browser_unavailable" for completion in completions)
 
 
+def completions_wallet_unavailable(completions: List[VariationalBrowserRequestCompletion]) -> bool:
+    return bool(completions) and any(completion.status == "wallet_unavailable" for completion in completions)
+
+
 def format_completions(completions: List[VariationalBrowserRequestCompletion]) -> str:
     return "\n".join(
         f"{completion.path.name}: {completion.status}"

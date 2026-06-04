@@ -44,6 +44,7 @@ from backend.bot.variational.browser_requests import (
     completions_browser_unavailable,
     completions_close_resolved,
     completions_external_closed,
+    completions_wallet_unavailable,
     format_completions,
     request_quantity,
 )
@@ -892,7 +893,7 @@ class BotEngine:
                 if execution_status != "clicked":
                     cooldown = (
                         self._browser_unavailable_retry_cooldown_sec
-                        if execution_status == "browser_unavailable"
+                        if execution_status in {"browser_unavailable", "wallet_unavailable"}
                         else self._entry_retry_cooldown_sec
                     )
                     self._entry_retry_after = time.time() + cooldown
@@ -1023,7 +1024,7 @@ class BotEngine:
                         if execution_status != "clicked":
                             cooldown = (
                                 self._browser_unavailable_retry_cooldown_sec
-                                if execution_status == "browser_unavailable"
+                                if execution_status in {"browser_unavailable", "wallet_unavailable"}
                                 else self._exit_retry_cooldown_sec
                             )
                             self._exit_retry_after[trade_id] = time.time() + cooldown
@@ -1165,6 +1166,19 @@ class BotEngine:
                     ]),
                 )
             return "browser_unavailable", summary
+
+        if completions_wallet_unavailable(completions):
+            logger.error("Variational Browser wallet unavailable during %s:\n%s", label, summary)
+            if self.telegram:
+                await self.telegram.error(
+                    "Variational Browser wallet unavailable",
+                    "\n".join([
+                        summary,
+                        "Variational page is disconnected/auth-required, so no live click was sent.",
+                        "Reconnect the wallet with tools/variational-browser --connect-wallet and keep variational-wallet running.",
+                    ]),
+                )
+            return "wallet_unavailable", summary
 
         logger.warning("Variational Browser %s not executed:\n%s", label, summary)
         if self.telegram:

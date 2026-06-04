@@ -599,6 +599,8 @@ class VariationalBrowserGate {
         ? "expired"
         : error?.code === "BROWSER_UNAVAILABLE" || isBrowserUnavailableError(error)
           ? "browser_unavailable"
+        : isWalletUnavailableError(error)
+          ? "wallet_unavailable"
         : "failed";
       await this.archiveRequestFile(processingPath, raw, status, filePath);
       error.archivedStatus = status;
@@ -2919,6 +2921,14 @@ function isBrowserUnavailableError(error) {
     || /Connection closed/i.test(text)
     || /WebSocket is not open/i.test(text)
     || /connectOverCDP/i.test(text);
+}
+
+function isWalletUnavailableError(error) {
+  const text = [error?.message, error?.stack, error?.cause?.message].filter(Boolean).join("\n");
+  return /wallet not ready/i.test(text)
+    || /wallet_disconnected/i.test(text)
+    || /wallet_auth_required/i.test(text)
+    || /wallet_human_verification_required/i.test(text);
 }
 
 function browserUnavailableError(cause) {
