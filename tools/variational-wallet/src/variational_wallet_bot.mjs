@@ -264,6 +264,8 @@ class VariationalWalletBot {
       `chains: ${this.config.chains.join(", ")}`,
       `dry_run: ${this.config.dryRun}`,
       `send_tx_enabled: ${this.config.allowSendTransaction}`,
+      `auto_approve_variational_session: ${this.config.autoApproveVariationalSession}`,
+      `auto_approve_variational_login: ${this.config.autoApproveVariationalLogin}`,
     ];
     if (this.config.pairingUriFileEnabled && this.config.pairingUriFile) {
       startLines.push(`pairing_uri_file: ${this.config.pairingUriFile}`);
@@ -376,13 +378,24 @@ class VariationalWalletBot {
       "Approve this WalletConnect session?",
     ].join("\n");
 
-    const decision = await this.telegram.requestApproval({
-      title: "[Variational Wallet] SESSION REQUEST",
-      body,
-      approveLabel: "Approve Session",
-      rejectLabel: "Reject",
-      timeoutMs: this.config.sessionApprovalTimeoutMs,
-    });
+    const autoSession = isAutoApprovedVariationalSession(proposal, this.config);
+    const decision = autoSession
+      ? { approved: true, reason: "auto_variational_session" }
+      : await this.telegram.requestApproval({
+        title: "[Variational Wallet] SESSION REQUEST",
+        body,
+        approveLabel: "Approve Session",
+        rejectLabel: "Reject",
+        timeoutMs: this.config.sessionApprovalTimeoutMs,
+      });
+    if (autoSession) {
+      await this.telegram.sendMessage([
+        "[Variational Wallet] session auto-approved",
+        `peer: ${peer.name || "unknown"}`,
+        `url: ${peer.url || "unknown"}`,
+        "reason: trusted Variational Omni session proposal",
+      ].join("\n"));
+    }
 
     if (!decision.approved) {
       await this.walletKit.rejectSession({
@@ -449,18 +462,31 @@ class VariationalWalletBot {
     }
 
     const summary = buildRequestSummary({ method, params, chainId, address, id });
-    const decision = await this.telegram.requestApproval({
-      title: "[Variational Wallet] SIGN REQUEST",
-      body: [
-        summary,
-        "",
-        `dry_run: ${this.config.dryRun}`,
-        "Approve signing this request?",
-      ].join("\n"),
-      approveLabel: "Sign",
-      rejectLabel: "Reject",
-      timeoutMs: this.config.approvalTimeoutMs,
-    });
+    const autoLogin = isAutoApprovedVariationalLogin({ method, params, chainId, address, config: this.config });
+    const decision = autoLogin.approved
+      ? { approved: true, reason: "auto_variational_login" }
+      : await this.telegram.requestApproval({
+        title: "[Variational Wallet] SIGN REQUEST",
+        body: [
+          summary,
+          "",
+          `dry_run: ${this.config.dryRun}`,
+          "Approve signing this request?",
+        ].join("\n"),
+        approveLabel: "Sign",
+        rejectLabel: "Reject",
+        timeoutMs: this.config.approvalTimeoutMs,
+      });
+    if (autoLogin.approved) {
+      await this.telegram.sendMessage([
+        "[Variational Wallet] login signature auto-approved",
+        `method: ${method}`,
+        `id: ${id}`,
+        `chain: ${chainId}`,
+        `wallet: ${address}`,
+        `reason: ${autoLogin.reason}`,
+      ].join("\n"));
+    }
     if (!decision.approved) {
       throw new Error(`user rejected: ${decision.reason}`);
     }
@@ -572,18 +598,112 @@ function buildRequestSummary({ method, params, chainId, address, id }) {
   return lines.join("\n");
 }
 
+function isAutoApprovedVariationalSession(proposal, config) {
+  if (!config.autoApproveVariationalSession) return false;
+  const peer = proposal.params?.proposer?.metadata || {};
+  return isAllowedVariationalUrl(peer.url, config.autoApproveVariationalHosts)
+    && /variational/i.test(`${peer.name || ""} ${peer.url || ""}`);
+}
+
+function isAutoApprovedVariationalLogin({ method, params, chainId, address, config }) {
+  if (!config.autoApproveVariationalLogin) {
+    return { approved: false, reason: "disabled" };
+  }
+  if (method !== "personal_sign") {
+    return { approved: false, reason: `method ${method} is not personal_sign` };
+  }
+  if (!config.chains.includes(chainId)) {
+    return { approved: false, reason: `chain ${chainId} is not allowed` };
+  }
+
+  const [messageRaw, signer] = params;
+  if (!addressMatches(signer, address)) {
+    return { approved: false, reason: `signer mismatch: ${signer || "missing"}` };
+  }
+
+  const message = decodeSignMessage(messageRaw);
+  if (!message.includes("wants you to sign in with your Ethereum account")) {
+    return { approved: false, reason: "not a login message" };
+  }
+  if (!message.includes(ethers.getAddress(address))) {
+    return { approved: false, reason: "wallet address missing from message" };
+  }
+
+  const uri = matchLineValue(message, "URI");
+  if (!uri || !isAllowedVariationalUrl(uri, config.autoApproveVariationalHosts, "/api/auth/login")) {
+    return { approved: false, reason: `login URI not allowed: ${uri || "missing"}` };
+  }
+
+  const chainIdNumber = String(chainIdToNumber(chainId));
+  if (matchLineValue(message, "Chain ID") !== chainIdNumber) {
+    return { approved: false, reason: "chain id missing or mismatched in message" };
+  }
+
+  const expiration = parseSiweDate(matchLineValue(message, "Expiration Time"));
+  if (!expiration) {
+    return { approved: false, reason: "expiration missing or invalid" };
+  }
+  const now = Date.now();
+  if (expiration.getTime() <= now) {
+    return { approved: false, reason: "login message expired" };
+  }
+  const maxExpiryMs = Math.max(1, config.autoApproveLoginMaxExpirySec) * 1000;
+  if (expiration.getTime() - now > maxExpiryMs) {
+    return { approved: false, reason: "login expiration is too far in the future" };
+  }
+
+  return { approved: true, reason: "trusted Variational login personal_sign" };
+}
+
+function isAllowedVariationalUrl(value, allowedHosts, requiredPath = "") {
+  try {
+    const url = new URL(String(value || ""));
+    if (url.protocol !== "https:") return false;
+    if (!allowedHosts.includes(url.hostname)) return false;
+    if (requiredPath && url.pathname !== requiredPath) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function addressMatches(candidate, address) {
+  if (!candidate) return false;
+  try {
+    return ethers.getAddress(candidate) === ethers.getAddress(address);
+  } catch {
+    return false;
+  }
+}
+
+function matchLineValue(message, label) {
+  const pattern = new RegExp(`^${label}:\\s*(.+)$`, "mi");
+  return message.match(pattern)?.[1]?.trim() || "";
+}
+
+function parseSiweDate(value) {
+  if (!value) return null;
+  const normalized = String(value).replace(/\.(\d{3})\d+(?=Z|[+-]\d{2}:?\d{2}$)/, ".$1");
+  const timestamp = Date.parse(normalized);
+  return Number.isFinite(timestamp) ? new Date(timestamp) : null;
+}
+
 function previewMessage(value) {
+  return decodeSignMessage(value).slice(0, 1200);
+}
+
+function decodeSignMessage(value) {
   if (typeof value !== "string") {
-    return JSON.stringify(value).slice(0, 1200);
+    return JSON.stringify(value);
   }
   if (ethers.isHexString(value)) {
     try {
-      return ethers.toUtf8String(value).slice(0, 1200);
+      return ethers.toUtf8String(value);
     } catch {
-      return `${value.slice(0, 1200)}${value.length > 1200 ? "..." : ""}`;
+      return value;
     }
   }
-  return value.slice(0, 1200);
+  return value;
 }
 
 function messageToBytesOrString(value) {
@@ -638,6 +758,10 @@ function loadConfig() {
     dryRun: envBool("VARIATIONAL_WC_DRY_RUN", true),
     allowSendTransaction: envBool("VARIATIONAL_WC_ALLOW_SEND_TRANSACTION", false),
     maxNativeValueWei: BigInt(env("VARIATIONAL_WC_MAX_NATIVE_VALUE_WEI", "0")),
+    autoApproveVariationalSession: envBool("VARIATIONAL_WC_AUTO_APPROVE_VARIATIONAL_SESSION", false),
+    autoApproveVariationalLogin: envBool("VARIATIONAL_WC_AUTO_APPROVE_VARIATIONAL_LOGIN", false),
+    autoApproveVariationalHosts: envList("VARIATIONAL_WC_AUTO_APPROVE_VARIATIONAL_HOSTS", ["omni.variational.io"]),
+    autoApproveLoginMaxExpirySec: Number(env("VARIATIONAL_WC_AUTO_APPROVE_LOGIN_MAX_EXPIRY_SEC", "180")),
     storagePrefix: env("VARIATIONAL_WC_STORAGE_PREFIX", "monk-variational-wallet"),
     pairingUriFileEnabled: envBool("VARIATIONAL_WC_PAIRING_URI_FILE_ENABLED", true),
     pairingUriFile: resolveRootPath(env(

@@ -67,6 +67,29 @@ message after the initial `SESSION REQUEST`. Approve that second request too.
 If `VARIATIONAL_WC_DRY_RUN=true`, the signer intentionally rejects the request
 after approval, so Variational will fall back to `Connect Wallet`.
 
+## Optional Auto-Approve For Reconnect
+
+For hands-off reconnects, keep the wallet process running and enable only the
+restricted Variational reconnect approvals:
+
+```env
+VARIATIONAL_WC_DRY_RUN=false
+VARIATIONAL_WC_AUTO_APPROVE_VARIATIONAL_SESSION=true
+VARIATIONAL_WC_AUTO_APPROVE_VARIATIONAL_LOGIN=true
+VARIATIONAL_WC_AUTO_APPROVE_VARIATIONAL_HOSTS=omni.variational.io
+VARIATIONAL_WC_AUTO_APPROVE_LOGIN_MAX_EXPIRY_SEC=180
+```
+
+This auto-approves only:
+
+- WalletConnect session proposals whose peer URL is `https://omni.variational.io`.
+- `personal_sign` login messages whose URI is
+  `https://omni.variational.io/api/auth/login`, chain is Arbitrum One, signer is
+  the configured wallet, and expiration is near-term.
+
+All transaction, typed-data, and non-login signing requests still go through the
+Telegram approval flow or the existing transaction guards.
+
 ## PM2
 
 After a successful manual pairing test:
