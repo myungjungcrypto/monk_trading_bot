@@ -3064,6 +3064,7 @@ function noPositionForReduceOnlyError(symbol, cause = "") {
 function isBrowserUnavailableError(error) {
   const text = [error?.message, error?.stack, error?.cause?.message].filter(Boolean).join("\n");
   return /Target page, context or browser has been closed/i.test(text)
+    || /Page crashed/i.test(text)
     || /Target closed/i.test(text)
     || /browser has been closed/i.test(text)
     || /Connection closed/i.test(text)
