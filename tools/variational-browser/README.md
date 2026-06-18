@@ -360,19 +360,55 @@ python -m backend.scripts.create_variational_browser_request \
   --size-usd 50
 ```
 
-The generator creates one request per leg by default. For
-`LONG_BTC_SHORT_ETH`, that means a BTC Buy request and an ETH Sell request. The
-request summary and `variationalOrder.quantity` use external median fair prices,
-not Variational's screen price. The requests stay dry-run by default. Generated
-requests include `maxAgeSec` from `VARIATIONAL_REQUEST_MAX_AGE_SEC` and default
-to 300 seconds so both legs can be approved sequentially. To create only one leg
-while testing selectors:
+The generator creates one batch request by default when both legs are selected.
+For `LONG_BTC_SHORT_ETH`, that batch contains a BTC Buy leg and an ETH Sell leg.
+The request summary and `variationalOrder.quantity` use external median fair
+prices, not Variational's screen price. The requests stay dry-run by default.
+Generated requests include `maxAgeSec` from `VARIATIONAL_REQUEST_MAX_AGE_SEC`
+and default to 300 seconds. Use `--no-batch` only when testing each leg
+separately. To create only one leg while testing selectors:
 
 ```bash
 python -m backend.scripts.create_variational_browser_request \
   --direction LONG_BTC_SHORT_ETH \
   --size-usd 50 \
   --legs BTC
+```
+
+To proactively capture the web order API flow without waiting for a real bot
+signal, use a tiny live batch order. Keep the bot stopped or use the dashboard
+kill switch if you want to avoid overlapping strategy entries while capturing:
+
+```env
+VARIATIONAL_BROWSER_NETWORK_CAPTURE_ENABLED=true
+VARIATIONAL_BROWSER_NETWORK_CAPTURE_INCLUDE_HEADERS=true
+VARIATIONAL_BROWSER_NETWORK_CAPTURE_INCLUDE_RESPONSE_BODIES=true
+VARIATIONAL_BROWSER_NETWORK_CAPTURE_MAX_BODY_BYTES=50000
+```
+
+```bash
+pm2 restart variational-browser --update-env
+
+cd ~/monk_trading_bot
+source venv/bin/activate
+python -m backend.scripts.create_variational_browser_request \
+  --direction LONG_BTC_SHORT_ETH \
+  --size-usd 25 \
+  --action open \
+  --batch \
+  --no-dry-run \
+  --max-age-sec 300 \
+  --approval-timeout-sec 300
+```
+
+If `VARIATIONAL_BROWSER_AUTO_CLICK_OPEN=true` and
+`VARIATIONAL_BROWSER_AUTO_CLICK_OPEN_MAX_SIZE_USD` is at least the requested
+size, the daemon can click automatically. Otherwise approve the Telegram
+request. After capture, close the tiny position from the dashboard or with
+Force Flatten, then inspect:
+
+```bash
+ls -lt tools/variational-browser/runtime/network-captures
 ```
 
 Create a reduce-only close request by inverting the original pair direction:

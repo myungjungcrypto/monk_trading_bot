@@ -35,11 +35,8 @@ async def main() -> None:
         raise SystemExit(f"Missing fair price for: {', '.join(missing)}")
 
     requests = build_requests(args, fair_prices)
-    request_dir = Path(args.request_dir).expanduser()
-    request_dir.mkdir(parents=True, exist_ok=True)
-    for request in requests:
-        path = request_dir / f"{request['id']}.json"
-        path.write_text(json.dumps(request, indent=2, ensure_ascii=False), encoding="utf-8")
+    paths = write_requests(requests, Path(args.request_dir).expanduser(), batch=args.batch)
+    for path in paths:
         print(path)
 
 
@@ -58,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--legs", choices=["both", "BTC", "ETH"], default="both")
     parser.add_argument("--confirm-selector", default=os.getenv("VARIATIONAL_BROWSER_CONFIRM_SELECTOR", "auto"))
     parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=env_bool("VARIATIONAL_BROWSER_DRY_RUN", True))
+    parser.add_argument("--batch", action=argparse.BooleanOptionalAction, default=env_bool("VARIATIONAL_BROWSER_BATCH_REQUESTS", True))
     parser.add_argument("--request-dir", default=os.getenv("VARIATIONAL_BROWSER_REQUEST_DIR", str(DEFAULT_REQUEST_DIR)))
     parser.add_argument("--steps-json", default="")
     parser.add_argument("--max-age-sec", type=int, default=int(os.getenv("VARIATIONAL_REQUEST_MAX_AGE_SEC", "300")))
@@ -140,6 +138,78 @@ def build_requests(args: argparse.Namespace, fair_prices: dict) -> list[dict]:
             },
         })
     return requests
+
+
+def write_requests(requests: list[dict], request_dir: Path, *, batch: bool = True) -> list[Path]:
+    request_dir.mkdir(parents=True, exist_ok=True)
+    if batch and len(requests) > 1:
+        batch_request = build_batch_request(requests)
+        path = request_dir / f"{batch_request['id']}.json"
+        path.write_text(json.dumps(batch_request, indent=2, ensure_ascii=False), encoding="utf-8")
+        return [path]
+
+    paths = []
+    for request in requests:
+        path = request_dir / f"{request['id']}.json"
+        path.write_text(json.dumps(request, indent=2, ensure_ascii=False), encoding="utf-8")
+        paths.append(path)
+    return paths
+
+
+def build_batch_request(requests: list[dict]) -> dict:
+    if not requests:
+        raise SystemExit("No requests to batch")
+
+    first = requests[0]
+    orders = [request.get("variationalOrder") or {} for request in requests]
+    action = str(orders[0].get("action", "open")).lower()
+    direction = orders[0].get("pairDirection") or first.get("signal", {}).get("direction")
+    summary_lines = [
+        f"Variational browser batch request: {direction}",
+        f"action: {action}",
+        "legs:",
+    ]
+    for order in orders:
+        summary_lines.append(
+            "  - {symbol} {side} qty={qty} reduce_only={reduce}".format(
+                symbol=order.get("symbol"),
+                side=order.get("side"),
+                qty=order.get("quantity"),
+                reduce=order.get("reduceOnly"),
+            )
+        )
+
+    fair = first.get("signal", {}).get("fair_price", {})
+    if fair:
+        summary_lines.append("decision_price: external median fair price, not Variational screen price")
+
+    return {
+        "id": str(first["id"]).rsplit("-", 1)[0],
+        "createdAt": first.get("createdAt"),
+        "summary": "\n".join(summary_lines),
+        "confirmSelector": first.get("confirmSelector", "auto"),
+        "dryRun": first.get("dryRun", True),
+        "maxAgeSec": first.get("maxAgeSec", 300),
+        "approvalTimeoutMs": max(int(request.get("approvalTimeoutMs", 120_000)) for request in requests),
+        "variationalBatch": requests,
+        "signal": {
+            "direction": direction,
+            "action": action,
+            "legs": [
+                {
+                    "symbol": order.get("symbol"),
+                    "side": order.get("side"),
+                    "quantity": order.get("quantity"),
+                    "reduce_only": order.get("reduceOnly"),
+                }
+                for order in orders
+            ],
+            "size_usd_per_leg": first.get("signal", {}).get("size_usd_per_leg"),
+            "zscore": first.get("signal", {}).get("zscore"),
+            "divergence_pct": first.get("signal", {}).get("divergence_pct"),
+            "fair_price": fair,
+        },
+    }
 
 
 def selected_legs(direction: str, legs_arg: str, action: str = "open") -> list[tuple[str, str]]:
