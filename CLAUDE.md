@@ -931,11 +931,14 @@ Dashboard HTTPS:
 - 대시보드/DB에는 포지션이 없는데 Variational에는 실제 포지션이 있는 상태가 보이면, 새 진입이 중복으로 나갈 수 있으므로 먼저 `pm2 stop monk-api`로 backend를 멈추고 실제 Variational 포지션을 수동 정리한 뒤 재시작한다.
 - 따라서 live 테스트는 계속 소액으로 진행하고, Telegram screenshot의 `symbol`, `side`, `quantity`, `reduceOnly`, `confirm_button_candidates`를 확인해야 한다.
 - `tools/variational-wallet`과 `tools/variational-browser`가 같은 Telegram bot token으로 동시에 polling하면 callback을 서로 가져갈 수 있다. 가능하면 브라우저 승인용 bot token을 분리한다.
+- 2026-06-18: UI click 방식은 BTC leg와 ETH leg 사이에 수십 초~수분 지연이 생겨 실시간 hedge 품질이 낮다. Direct API 전환은 현재 운영 경로를 덮어쓰지 않고, 먼저 `VARIATIONAL_BROWSER_NETWORK_CAPTURE_ENABLED=true`로 기존 browser request 처리 중 Variational same-origin HTTP/WS 요청을 `tools/variational-browser/runtime/network-captures/*.ndjson`에 기록해 주문 payload, auth/session, ack 흐름을 확인하는 단계부터 진행한다. 기본값은 꺼짐이며, headers/response body도 기본 redacted/off다. 충분한 캡처 샘플을 확보한 뒤 `variational_api_shadow` 같은 별도 실행 모드에서 dry-run/compare를 거쳐 live direct executor로 넘어간다.
 - Variational 공식 trading API가 생기면 browser click gate는 제거하고 API execution adapter로 교체하는 것이 최종 목표다.
 
 ### English Explanation: Trading Without a Variational API
 
 Variational does not currently expose a public trading API, so this project uses a controlled browser-execution bridge instead of direct API order placement.
+
+The next experimental direction is not to replace the live browser path blindly. First, the browser gate can optionally capture same-origin HTTP and WebSocket traffic while processing existing request files. This capture is disabled by default and writes NDJSON under `tools/variational-browser/runtime/network-captures/`. The goal is to identify the exact order payload, session/auth requirements, acknowledgement flow, and rollback semantics before building a separate direct API executor. The current live click executor remains the fallback until the direct path proves it can open both BTC and ETH legs nearly simultaneously and handle partial failures safely.
 
 The trading signal engine still runs server-side. It receives live BTC/ETH prices, builds the pair-trading signal, and calculates order size from an external fair price. That fair price is the median of independent venues such as Binance, Lighter, and Hyperliquid, so Variational's on-screen price is not used as the decision source.
 

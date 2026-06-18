@@ -272,6 +272,9 @@ class VariationalBrowserGate {
     this.page = null;
     this.killSwitchLogged = false;
     this.connectedOverCdp = false;
+    this.networkCaptureStarted = false;
+    this.networkCaptureContext = null;
+    this.networkCaptureFile = null;
   }
 
   async start({ pollTelegram = true } = {}) {
@@ -312,7 +315,102 @@ class VariationalBrowserGate {
     this.page.setDefaultNavigationTimeout(this.config.navigationTimeoutMs);
     await this.grantClipboardPermissions();
     await this.applyViewportSize("startup");
+    await this.startNetworkCaptureIfEnabled();
     console.log(`[Variational Browser] browser ready pages=${this.context.pages().length}`);
+  }
+
+  async startNetworkCaptureIfEnabled() {
+    if (!this.config.networkCaptureEnabled || this.networkCaptureStarted) return;
+    this.networkCaptureStarted = true;
+    await ensureDir(this.config.networkCaptureDir);
+    const fileName = `${new Date().toISOString().replace(/[:.]/g, "-")}-${Date.now()}.ndjson`;
+    this.networkCaptureFile = path.join(this.config.networkCaptureDir, fileName);
+    await this.appendNetworkCapture({
+      type: "capture_started",
+      base_url: this.config.variationalBaseUrl,
+      include_headers: this.config.networkCaptureIncludeHeaders,
+      include_response_bodies: this.config.networkCaptureIncludeResponseBodies,
+    });
+    console.log(`[Variational Browser] network capture enabled: ${this.networkCaptureFile}`);
+
+    this.page.on("request", (request) => {
+      if (!this.shouldCaptureUrl(request.url())) return;
+      this.appendNetworkCapture({
+        type: "http_request",
+        method: request.method(),
+        url: request.url(),
+        resource_type: request.resourceType(),
+        headers: this.config.networkCaptureIncludeHeaders ? redactHeaders(request.headers()) : undefined,
+        post_data: limitText(request.postData() || "", this.config.networkCaptureMaxBodyBytes),
+      }).catch((error) => console.warn(`[network-capture] request capture failed: ${error.message}`));
+    });
+
+    this.page.on("response", (response) => {
+      if (!this.shouldCaptureUrl(response.url())) return;
+      this.captureResponse(response).catch((error) => {
+        console.warn(`[network-capture] response capture failed: ${error.message}`);
+      });
+    });
+
+    this.page.on("websocket", (ws) => {
+      if (!this.shouldCaptureUrl(ws.url())) return;
+      this.appendNetworkCapture({ type: "ws_open", url: ws.url() })
+        .catch((error) => console.warn(`[network-capture] ws open capture failed: ${error.message}`));
+      ws.on("framesent", (event) => {
+        this.appendNetworkCapture({
+          type: "ws_frame_sent",
+          url: ws.url(),
+          payload: limitText(String(event.payload || ""), this.config.networkCaptureMaxBodyBytes),
+        }).catch((error) => console.warn(`[network-capture] ws sent capture failed: ${error.message}`));
+      });
+      ws.on("framereceived", (event) => {
+        this.appendNetworkCapture({
+          type: "ws_frame_received",
+          url: ws.url(),
+          payload: limitText(String(event.payload || ""), this.config.networkCaptureMaxBodyBytes),
+        }).catch((error) => console.warn(`[network-capture] ws received capture failed: ${error.message}`));
+      });
+      ws.on("close", () => {
+        this.appendNetworkCapture({ type: "ws_close", url: ws.url() }).catch(() => {});
+      });
+    });
+  }
+
+  async captureResponse(response) {
+    const record = {
+      type: "http_response",
+      url: response.url(),
+      status: response.status(),
+      headers: this.config.networkCaptureIncludeHeaders ? redactHeaders(response.headers()) : undefined,
+    };
+    if (this.config.networkCaptureIncludeResponseBodies) {
+      const contentType = response.headers()["content-type"] || "";
+      if (/json|text|javascript|graphql/i.test(contentType)) {
+        record.body = limitText(await response.text().catch((error) => `[unreadable response body: ${error.message}]`), this.config.networkCaptureMaxBodyBytes);
+      }
+    }
+    await this.appendNetworkCapture(record);
+  }
+
+  shouldCaptureUrl(url) {
+    if (!url) return false;
+    try {
+      const target = new URL(url);
+      const base = new URL(this.config.variationalBaseUrl);
+      return target.hostname === base.hostname;
+    } catch {
+      return false;
+    }
+  }
+
+  async appendNetworkCapture(record) {
+    if (!this.networkCaptureFile) return;
+    const line = JSON.stringify({
+      ts: new Date().toISOString(),
+      context: this.networkCaptureContext,
+      ...record,
+    });
+    await fs.promises.appendFile(this.networkCaptureFile, `${line}\n`);
   }
 
   async grantClipboardPermissions() {
@@ -672,7 +770,20 @@ class VariationalBrowserGate {
     try {
       const request = JSON.parse(raw);
       request.id ||= path.basename(filePath, path.extname(filePath));
-      const result = await this.processRequest(request);
+      const previousCaptureContext = this.networkCaptureContext;
+      this.networkCaptureContext = {
+        request_id: request.id,
+        action: request.action || request.variationalAction || "",
+        batch_legs: Array.isArray(request.variationalBatch) ? request.variationalBatch.length : 0,
+      };
+      let result;
+      try {
+        await this.appendNetworkCapture({ type: "request_processing_started" });
+        result = await this.processRequest(request);
+        await this.appendNetworkCapture({ type: "request_processing_finished", status: result?.status || "unknown" });
+      } finally {
+        this.networkCaptureContext = previousCaptureContext;
+      }
       await this.archiveRequestFile(processingPath, raw, result.status, filePath);
       return result;
     } catch (error) {
@@ -2799,6 +2910,7 @@ function loadConfig() {
     profileDir: path.resolve(ROOT, env("VARIATIONAL_BROWSER_PROFILE_DIR", path.join("tools", "variational-browser", "runtime", "profile"))),
     requestDir: path.resolve(ROOT, env("VARIATIONAL_BROWSER_REQUEST_DIR", path.join("tools", "variational-browser", "runtime", "requests"))),
     screenshotDir: path.resolve(ROOT, env("VARIATIONAL_BROWSER_SCREENSHOT_DIR", path.join("tools", "variational-browser", "runtime", "screenshots"))),
+    networkCaptureDir: path.resolve(ROOT, env("VARIATIONAL_BROWSER_NETWORK_CAPTURE_DIR", path.join("tools", "variational-browser", "runtime", "network-captures"))),
     killSwitchPath: path.resolve(ROOT, env("VARIATIONAL_BROWSER_KILL_SWITCH_PATH", path.join("tools", "variational-browser", "runtime", "kill_switch.json"))),
     confirmSelector: env("VARIATIONAL_BROWSER_CONFIRM_SELECTOR", "auto"),
     headless: envBool("VARIATIONAL_BROWSER_HEADLESS", true),
@@ -2807,6 +2919,10 @@ function loadConfig() {
     browserChannel: env("VARIATIONAL_BROWSER_CHANNEL", ""),
     extraBrowserArgs: envList("VARIATIONAL_BROWSER_EXTRA_ARGS", []),
     dryRun: envBool("VARIATIONAL_BROWSER_DRY_RUN", true),
+    networkCaptureEnabled: envBool("VARIATIONAL_BROWSER_NETWORK_CAPTURE_ENABLED", false),
+    networkCaptureIncludeHeaders: envBool("VARIATIONAL_BROWSER_NETWORK_CAPTURE_INCLUDE_HEADERS", false),
+    networkCaptureIncludeResponseBodies: envBool("VARIATIONAL_BROWSER_NETWORK_CAPTURE_INCLUDE_RESPONSE_BODIES", false),
+    networkCaptureMaxBodyBytes: Number(env("VARIATIONAL_BROWSER_NETWORK_CAPTURE_MAX_BODY_BYTES", "20000")),
     autoClickReduceOnly: envBool("VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY", true),
     autoClickOpen: envBool("VARIATIONAL_BROWSER_AUTO_CLICK_OPEN", false),
     autoClickOpenMaxSizeUsd: Number(env("VARIATIONAL_BROWSER_AUTO_CLICK_OPEN_MAX_SIZE_USD", "100")),
@@ -3059,6 +3175,22 @@ function noPositionForReduceOnlyError(symbol, cause = "") {
   const error = new Error(`No open ${symbol} position found while preparing reduce-only close${suffix}`);
   error.code = "NO_POSITION_FOR_REDUCE_ONLY";
   return error;
+}
+
+function redactHeaders(headers = {}) {
+  const sensitive = new Set(["authorization", "cookie", "set-cookie", "x-csrf-token", "x-xsrf-token"]);
+  return Object.fromEntries(Object.entries(headers).map(([key, value]) => [
+    key,
+    sensitive.has(key.toLowerCase()) ? "[redacted]" : value,
+  ]));
+}
+
+function limitText(value, maxBytes) {
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  if (!text) return "";
+  const max = Math.max(0, Number(maxBytes) || 0);
+  if (!max || Buffer.byteLength(text, "utf8") <= max) return text;
+  return `${Buffer.from(text, "utf8").subarray(0, max).toString("utf8")}...[truncated]`;
 }
 
 function isBrowserUnavailableError(error) {
