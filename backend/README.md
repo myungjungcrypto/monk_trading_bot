@@ -111,6 +111,7 @@ backend/
 │       └── variational.py        # Variational direct-API connector (SIWE + RFQ + EIP-712)
 ├── tools/
 │   ├── har_extractor.py          # HAR → endpoint map (the capture bridge)
+│   ├── cf_bootstrap.py           # fallback: obtain a Cloudflare cf_clearance cookie
 │   └── smoke_test.py             # live check: login + balance + quotes + dry-run pair order
 ├── config/
 │   └── variational_endpoints.sample.json
@@ -142,9 +143,33 @@ the first dry-run against the live backend:
   and also keeps any `Set-Cookie` the server returns. A 401 triggers one
   automatic re-login; if it persists, the token travels some other way — capture
   again with a proxy (e.g. mitmproxy) instead of DevTools.
-- **Cloudflare** — the host runs Cloudflare's JS challenge for page loads. If
-  server-side API calls get challenged (403 with `cdn-cgi` in the body), try the
-  documented client-API host in `VARIATIONAL_API_BASE` (see `.env.example`).
-
 Keep `VARIATIONAL_DRY_RUN=true` for the first run: it performs the full
 login + quote flow live and logs the exact order body without submitting it.
+
+## Cloudflare
+
+The Omni host is behind Cloudflare. A plain HTTP client gets a `403 "Just a
+moment..."` challenge because its TLS/HTTP2 fingerprint doesn't match a browser.
+The connector handles this in layers:
+
+1. **curl_cffi impersonation (default).** With `VARIATIONAL_IMPERSONATE=chrome`
+   (and `pip install curl_cffi`), requests use Chrome's TLS fingerprint, which
+   passes fingerprint-based challenges **without running a browser**. This is the
+   primary transport; httpx is only the fallback (and what the tests mock).
+
+2. **cf_clearance cookie (fallback).** If the host runs a full JS challenge that
+   impersonation can't pass, solve it once with a real browser **on the server**
+   and reuse the cookie:
+
+   ```bash
+   pip install playwright && python -m playwright install chromium
+   python -m tools.cf_bootstrap            # prints cf_clearance + user-agent
+   # paste both into .env: VARIATIONAL_CF_CLEARANCE=... / VARIATIONAL_USER_AGENT=...
+   ```
+
+   `cf_clearance` is bound to the solving IP, so run `cf_bootstrap` on the same
+   server the bot runs on. It expires (~30 min–hours); re-run when auth 403s.
+
+The connector raises a clear, actionable error (naming curl_cffi and
+`cf_bootstrap`) whenever it detects a Cloudflare interstitial, so you always know
+which layer to reach for.

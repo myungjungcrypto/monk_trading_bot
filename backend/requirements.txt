@@ -1,5 +1,6 @@
 # --- Core async HTTP / signing stack for direct-API order routing ---
-httpx[http2]==0.27.2        # async HTTP client (HTTP/2, keep-alive) for low-latency order calls
+httpx[http2]==0.27.2        # async HTTP client (fallback transport + test mocking)
+curl_cffi==0.7.4            # browser-TLS-impersonating client to pass Cloudflare (primary transport)
 eth-account==0.13.4         # EIP-712 typed-data + personal_sign (SIWE) wallet signing
 eth-utils==5.1.0
 web3==7.6.0                 # optional on-chain reads (settlement pool, balances)

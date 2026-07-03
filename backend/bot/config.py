@@ -47,6 +47,20 @@ class VariationalSettings(BaseSettings):
         default=True,
         description="If true, sign+log but do not POST orders to the exchange.",
     )
+    impersonate: str = Field(
+        default="chrome",
+        description="curl_cffi browser to impersonate for Cloudflare (e.g. 'chrome'). "
+        "Empty string disables impersonation and uses plain httpx.",
+    )
+    user_agent: str = Field(
+        default="",
+        description="Override User-Agent (httpx fallback path). Empty uses a Chrome default.",
+    )
+    cf_clearance: str = Field(
+        default="",
+        description="Optional cf_clearance cookie for the browser-bootstrap fallback "
+        "(tools/cf_bootstrap.py). Only valid from the IP that solved the challenge.",
+    )
 
     @property
     def endpoint_map_path(self) -> Path:

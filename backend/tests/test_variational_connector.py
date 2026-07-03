@@ -45,6 +45,7 @@ def _settings(**overrides) -> VariationalSettings:
         endpoint_map="does-not-exist.json",  # use verified defaults
         dry_run=True,
         max_slippage=0.0005,
+        impersonate="",  # use httpx so respx can mock the backend
     )
     base.update(overrides)
     return VariationalSettings(**base)
@@ -258,6 +259,23 @@ async def test_reauthenticates_on_401():
         await c.close()
     # Once at connect, once after the 401.
     assert login.call_count == 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_cloudflare_challenge_raises_actionable_error():
+    respx.post(f"{API}/api/auth/generate_signing_data").mock(
+        return_value=httpx.Response(
+            403,
+            text='<!DOCTYPE html><html><head><title>Just a moment...</title></head></html>',
+        )
+    )
+    c = VariationalConnector(_settings())
+    with pytest.raises(Exception) as exc:
+        await c.connect()
+    await c.close()
+    assert "Cloudflare" in str(exc.value)
+    assert "curl_cffi" in str(exc.value)
 
 
 @pytest.mark.asyncio

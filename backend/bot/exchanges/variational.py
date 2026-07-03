@@ -63,9 +63,8 @@ import logging
 from decimal import ROUND_DOWN, Decimal
 from typing import Any, Optional
 
-import httpx
-
 from bot.config import VariationalSettings, get_variational_settings
+from bot.exchanges._http import build_transport
 from bot.exchanges.base import (
     BaseExchange,
     ExchangeError,
@@ -76,15 +75,6 @@ from bot.exchanges.base import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _http2_available() -> bool:
-    """True if httpx can negotiate HTTP/2 (the optional `h2` package is installed)."""
-    try:
-        import h2  # noqa: F401
-        return True
-    except ImportError:
-        return False
 
 
 # Verified against HAR capture 2026-07-03. An endpoint map produced by
@@ -119,7 +109,7 @@ class VariationalConnector(BaseExchange):
 
     def __init__(self, settings: Optional[VariationalSettings] = None):
         self.settings = settings or get_variational_settings()
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client = None  # transport (curl_cffi or httpx), set in connect()
         self._endpoint_map: dict[str, Any] = {}
         self._session_token: Optional[str] = None
         self._address: Optional[str] = None
@@ -127,16 +117,11 @@ class VariationalConnector(BaseExchange):
     # -- lifecycle ----------------------------------------------------------
     async def connect(self) -> None:
         if self._client is None:
-            self._client = httpx.AsyncClient(
-                base_url=self.settings.api_base,
-                timeout=httpx.Timeout(10.0, connect=5.0),
-                # HTTP/2 multiplexes both pair legs over one connection, shaving
-                # latency — but only if the optional `h2` package is present.
-                http2=_http2_available(),
-                headers={
-                    "content-type": "application/json",
-                    "accept": "*/*",
-                },
+            self._client = build_transport(
+                impersonate=self.settings.impersonate,
+                origin=self.settings.api_base.rstrip("/"),
+                user_agent=self.settings.user_agent,
+                cf_clearance=self.settings.cf_clearance,
             )
         self._load_endpoint_map()
         self._address = self._derive_address()
@@ -149,6 +134,12 @@ class VariationalConnector(BaseExchange):
             await self._client.aclose()
             self._client = None
         self._session_token = None
+
+    def _url(self, path: str) -> str:
+        """Absolute URL for an endpoint path (transports don't share a base_url)."""
+        if path.startswith("http"):
+            return path
+        return self.settings.api_base.rstrip("/") + path
 
     # -- endpoint map -------------------------------------------------------
     def _load_endpoint_map(self) -> None:
@@ -369,9 +360,19 @@ class VariationalConnector(BaseExchange):
         if self._client is None:
             raise ExchangeError("Connector not connected; call connect().", venue=self.name)
         try:
-            resp = await self._client.request(method, path, **kwargs)
-        except httpx.HTTPError as exc:
+            resp = await self._client.request(method, self._url(path), **kwargs)
+        except Exception as exc:  # httpx.HTTPError or curl_cffi.CurlError
             raise ExchangeError(f"HTTP error on {method} {path}: {exc}", venue=self.name) from exc
+
+        # Cloudflare interstitial — surface a clear, actionable message.
+        if resp.status_code in (403, 503) and self._is_cloudflare_challenge(resp):
+            raise ExchangeError(
+                f"{method} {path} -> {resp.status_code}: blocked by Cloudflare challenge. "
+                "Use curl_cffi impersonation (VARIATIONAL_IMPERSONATE=chrome, "
+                "`pip install curl_cffi`) or inject a cf_clearance cookie "
+                "(see tools/cf_bootstrap.py).",
+                venue=self.name,
+            )
 
         # Session JWTs expire; transparently re-login once and retry.
         if resp.status_code == 401 and _retry_auth:
@@ -394,6 +395,15 @@ class VariationalConnector(BaseExchange):
             return resp.text
 
     # -- helpers ------------------------------------------------------------
+    @staticmethod
+    def _is_cloudflare_challenge(resp: Any) -> bool:
+        try:
+            text = resp.text
+        except Exception:
+            return False
+        markers = ("Just a moment", "cf-challenge", "cdn-cgi/challenge", "Attention Required")
+        return any(m in text for m in markers)
+
     @staticmethod
     def _as_decimal(value: Any) -> Optional[Decimal]:
         if value is None or value == "":
