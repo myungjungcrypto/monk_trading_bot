@@ -171,7 +171,15 @@ class PlaywrightTransport:
             ) from exc
 
         self._pw = await async_playwright().start()
-        launch_kw: dict = {"headless": self._headless}
+        # Anti-detection + server-friendly launch args. --no-sandbox and
+        # --disable-dev-shm-usage are usually required on EC2/containers;
+        # --disable-blink-features=AutomationControlled hides the automation flag.
+        args = [
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+        ]
+        launch_kw: dict = {"headless": self._headless, "args": args}
         if self._executable_path:
             launch_kw["executable_path"] = self._executable_path
 
@@ -183,7 +191,26 @@ class PlaywrightTransport:
         else:
             self._browser = await self._pw.chromium.launch(**launch_kw)
             self._context = await self._browser.new_context(user_agent=self._ua or None)
+
+        # navigator.webdriver=true is a dead giveaway Cloudflare checks for.
+        await self._context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+
         self._page = self._context.pages[0] if self._context.pages else await self._context.new_page()
+
+        # A headless real Chrome sends "HeadlessChrome" in its User-Agent (both the
+        # HTTP header and navigator.userAgent) — an instant Cloudflare flag. Strip
+        # it via CDP, which overrides both, before we ever hit the origin.
+        try:
+            cdp = await self._context.new_cdp_session(self._page)
+            ua = self._ua or await self._page.evaluate("navigator.userAgent")
+            if "Headless" in ua:
+                ua = ua.replace("HeadlessChrome", "Chrome").replace("Headless", "")
+            await cdp.send("Network.setUserAgentOverride", {"userAgent": ua})
+        except Exception as exc:  # pragma: no cover - best-effort hardening
+            logger.warning("Could not override User-Agent via CDP: %s", exc)
+
         await self._page.goto(self._origin + "/", wait_until="domcontentloaded")
 
         # Wait out the Cloudflare interstitial if present.
