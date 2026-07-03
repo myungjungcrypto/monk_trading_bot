@@ -34,7 +34,7 @@ class ExchangeError(Exception):
         self.payload = payload
 
 
-@dataclass(slots=True)
+@dataclass
 class Order:
     """A single-leg order request (venue-agnostic)."""
 
@@ -48,7 +48,7 @@ class Order:
     size_base: Optional[Decimal] = None  # exact base-asset qty; overrides size_usd (for closes)
 
 
-@dataclass(slots=True)
+@dataclass
 class OrderResult:
     """Normalized response after an order is accepted (or simulated)."""
 
@@ -64,7 +64,7 @@ class OrderResult:
     dry_run: bool = False
 
 
-@dataclass(slots=True)
+@dataclass
 class Position:
     """Current open position for one symbol."""
 
