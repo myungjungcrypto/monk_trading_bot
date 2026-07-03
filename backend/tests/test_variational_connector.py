@@ -52,8 +52,8 @@ def _settings(**overrides) -> VariationalSettings:
     return VariationalSettings(**base)
 
 
-def _quote(qty: str, quote_id: str, mark="2000", bid="1999", ask="2001") -> dict:
-    return {
+def _quote(qty: str, quote_id: str, mark="2000", bid="1999", ask="2001", tick=None, min_qty=None) -> dict:
+    q = {
         "instrument": {
             "instrument_type": "perpetual_future",
             "underlying": "ETH",
@@ -67,6 +67,12 @@ def _quote(qty: str, quote_id: str, mark="2000", bid="1999", ask="2001") -> dict
         "index_price": mark,
         "quote_id": quote_id,
     }
+    if tick is not None:
+        q["qty_limits"] = {
+            "bid": {"min_qty_tick": tick, "min_qty": min_qty or "0"},
+            "ask": {"min_qty_tick": tick, "min_qty": min_qty or "0"},
+        }
+    return q
 
 
 def _mock_auth():
@@ -161,6 +167,56 @@ async def test_place_order_dry_run_quotes_but_does_not_submit():
     assert result.raw["submit_body"]["max_slippage"] == 0.0005
     assert result.raw["submit_body"]["is_reduce_only"] is False
     assert result.filled_price == Decimal("2001")  # buy crosses the ask
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_order_qty_floored_to_min_qty_tick():
+    _mock_auth()
+    calls = []
+
+    def quote_side_effect(request):
+        body = json.loads(request.content)
+        calls.append(body)
+        # mark 1730; tick 0.00001 -> qty must be a multiple of 1e-5.
+        return httpx.Response(200, json=_quote(body["qty"], f"q{len(calls)}",
+                                               mark="1730", bid="1729", ask="1731",
+                                               tick="0.00001", min_qty="0.00006"))
+
+    respx.post(f"{API}/api/quotes/indicative").mock(side_effect=quote_side_effect)
+
+    c = VariationalConnector(_settings(dry_run=True))
+    await c.connect()
+    try:
+        # 5 / 1730 = 0.002890173... -> floored to 0.00289 (multiple of 0.00001).
+        res = await c.place_order(Order(symbol="ETH", side=Side.BUY, size_usd=Decimal("5")))
+    finally:
+        await c.close()
+
+    submitted_qty = calls[1]["qty"]
+    assert submitted_qty == "0.00289"
+    # It's an exact multiple of the tick.
+    assert (Decimal(submitted_qty) % Decimal("0.00001")) == 0
+    assert res.dry_run
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_order_below_min_qty_raises():
+    _mock_auth()
+    respx.post(f"{API}/api/quotes/indicative").mock(
+        return_value=httpx.Response(200, json=_quote("0.001", "q1", mark="60000",
+                                                     tick="0.000001", min_qty="0.001"))
+    )
+    c = VariationalConnector(_settings(dry_run=True))
+    await c.connect()
+    try:
+        # $5 / 60000 = 0.0000833 -> below min_qty 0.001.
+        with pytest.raises(Exception) as exc:
+            await c.place_order(Order(symbol="BTC", side=Side.BUY, size_usd=Decimal("5")))
+        assert "below the venue minimum" in str(exc.value)
+    finally:
+        await c.close()
 
 
 @pytest.mark.asyncio

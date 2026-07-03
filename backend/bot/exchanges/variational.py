@@ -92,8 +92,8 @@ _DEFAULT_PATHS: dict[str, tuple[str, str]] = {
 # Small base-asset qty used for price-discovery quotes (indicative only, no order).
 _DISCOVERY_QTY = Decimal("0.001")
 
-# Base-asset quantities are sent as strings; the web client sends up to 18 dp.
-_QTY_PRECISION = Decimal("1e-9")
+# Fallback qty tick if a quote omits qty_limits (BTC perp tick observed = 1e-6).
+_DEFAULT_QTY_TICK = Decimal("0.000001")
 
 
 def _fmt_qty(qty: Decimal) -> str:
@@ -263,17 +263,44 @@ class VariationalConnector(BaseExchange):
             raise ExchangeError(f"No mark price for {symbol}.", venue=self.name, payload=quote)
         return price
 
+    @staticmethod
+    def _qty_limits(quote: dict[str, Any], side: Side) -> tuple[Decimal, Decimal]:
+        """(min_qty_tick, min_qty) for the relevant book side from a quote.
+
+        A BUY crosses the ask, a SELL hits the bid. The venue rejects an order
+        whose qty isn't a multiple of min_qty_tick, or below min_qty.
+        """
+        book = "ask" if side is Side.BUY else "bid"
+        limits = ((quote.get("qty_limits") or {}).get(book)) or {}
+        tick = VariationalConnector._as_decimal(limits.get("min_qty_tick")) or _DEFAULT_QTY_TICK
+        min_qty = VariationalConnector._as_decimal(limits.get("min_qty")) or Decimal(0)
+        return tick, min_qty
+
+    @staticmethod
+    def _floor_to_tick(qty: Decimal, tick: Decimal) -> Decimal:
+        if tick <= 0:
+            return qty
+        steps = (qty / tick).to_integral_value(rounding=ROUND_DOWN)
+        return steps * tick
+
     # -- trading --------------------------------------------------------------
     async def place_order(self, order: Order) -> OrderResult:
         """Discovery quote (USD -> base qty) -> real quote -> market order.
 
         Quotes expire in seconds, so the submit follows the quote immediately.
         """
-        mark = await self.get_mark_price(order.symbol)
-        qty = (order.size_usd / mark).quantize(_QTY_PRECISION, rounding=ROUND_DOWN)
-        if qty <= 0:
+        # One discovery quote gives us both the mark price and the qty limits.
+        disc = await self.request_quote(order.symbol, _DISCOVERY_QTY)
+        mark = self._as_decimal(disc.get("mark_price"))
+        if mark is None or mark <= 0:
+            raise ExchangeError(f"No mark price for {order.symbol}.", venue=self.name, payload=disc)
+
+        tick, min_qty = self._qty_limits(disc, order.side)
+        qty = self._floor_to_tick(order.size_usd / mark, tick)
+        if qty < min_qty or qty <= 0:
             raise ExchangeError(
-                f"size_usd {order.size_usd} too small for {order.symbol} at {mark}.",
+                f"size_usd {order.size_usd} -> qty {qty} for {order.symbol} is below the "
+                f"venue minimum ({min_qty}, tick {tick}) at mark {mark}. Increase size_usd.",
                 venue=self.name,
             )
         quote = await self.request_quote(order.symbol, qty)
