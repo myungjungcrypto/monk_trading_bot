@@ -1,6 +1,18 @@
 .env
 .env.*
+!.env.example
+!.env.sample
 __pycache__/
 *.pyc
 node_modules/
 .DS_Store
+
+# Python virtualenvs
+.venv/
+venv/
+.pytest_cache/
+
+# Browser captures and real (non-sample) endpoint maps may contain
+# account-specific data — keep them local. The redacted *.sample.json is tracked.
+*.har
+backend/config/variational_endpoints.json

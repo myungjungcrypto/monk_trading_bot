@@ -1,0 +1,19 @@
+# --- Core async HTTP / signing stack for direct-API order routing ---
+httpx[http2]==0.27.2        # async HTTP client (HTTP/2, keep-alive) for low-latency order calls
+eth-account==0.13.4         # EIP-712 typed-data + personal_sign (SIWE) wallet signing
+eth-utils==5.1.0
+web3==7.6.0                 # optional on-chain reads (settlement pool, balances)
+pydantic==2.9.2            # request/response models & config validation
+pydantic-settings==2.6.1
+python-dotenv==1.0.1
+tenacity==9.0.0            # retry/backoff for transient network errors
+
+# --- Bot engine / signal stack (per project plan) ---
+numpy==2.1.3
+scipy==1.14.1
+pandas==2.2.3
+
+# --- Dev / test ---
+pytest==8.3.3
+pytest-asyncio==0.24.0
+respx==0.21.1              # httpx mock transport for connector tests
