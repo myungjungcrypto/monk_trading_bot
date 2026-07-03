@@ -201,6 +201,15 @@ class BotEngine:
         return VIRTUAL_EXCHANGE_NAME
 
     @property
+    def _variational_label(self) -> str:
+        """Log/telegram prefix that matches how Variational orders are executed."""
+        return (
+            "Variational API"
+            if self.execution_mode == EXECUTION_VARIATIONAL_API
+            else "Variational Browser"
+        )
+
+    @property
     def is_running(self) -> bool:
         return self._running
 
@@ -1116,22 +1125,24 @@ class BotEngine:
         label: str,
         batch: VariationalBrowserRequestBatch,
     ) -> None:
+        vlabel = self._variational_label
         logger.info(
-            "Variational Browser %s requests queued: %s",
+            "%s %s requests queued: %s",
+            vlabel,
             label,
             ", ".join(str(path) for path in batch.paths),
         )
         if not self.telegram:
             return
-        await self.telegram.status(
-            "\n".join([
-                f"Variational Browser {label} requests queued",
-                f"action: {batch.action}",
-                "files:",
-                *[str(path) for path in batch.paths],
-                "Run tools/variational-browser daemon to process them.",
-            ])
-        )
+        lines = [
+            f"{vlabel} {label} requests queued",
+            f"action: {batch.action}",
+            "files:",
+            *[str(path) for path in batch.paths],
+        ]
+        if self.execution_mode == EXECUTION_VARIATIONAL_BROWSER:
+            lines.append("Run tools/variational-browser daemon to process them.")
+        await self.telegram.status("\n".join(lines))
 
     async def _await_variational_browser_execution(
         self,
@@ -1149,27 +1160,28 @@ class BotEngine:
         if self.variational_bridge is None:
             return "clicked", ""
 
+        vlabel = self._variational_label
         completions = await self.variational_bridge.wait_for_batch_completion(batch)
         summary = format_completions(completions)
         if completions_all_clicked(completions):
-            logger.info("Variational Browser %s clicks confirmed:\n%s", label, summary)
+            logger.info("%s %s execution confirmed:\n%s", vlabel, label, summary)
             if self.telegram:
                 await self.telegram.status(
                     "\n".join([
-                        f"Variational Browser {label} clicks confirmed",
+                        f"{vlabel} {label} execution confirmed",
                         summary,
                     ])
                 )
             return "clicked", summary
 
         if label == "close" and completions_close_resolved(completions):
-            logger.warning("Variational Browser close resolved by external flat state:\n%s", summary)
+            logger.warning("%s close resolved by external flat state:\n%s", vlabel, summary)
             if self.telegram:
                 await self.telegram.status(
                     "\n".join([
-                        "Variational Browser close resolved externally",
+                        f"{vlabel} close resolved externally",
                         summary,
-                        "No live close click was needed because Variational appeared flat.",
+                        "No live close was needed because Variational appeared flat.",
                     ])
                 )
             if completions_external_closed(completions):
@@ -1202,10 +1214,10 @@ class BotEngine:
                 )
             return "wallet_unavailable", summary
 
-        logger.warning("Variational Browser %s not executed:\n%s", label, summary)
+        logger.warning("%s %s not executed:\n%s", vlabel, label, summary)
         if self.telegram:
             await self.telegram.error(
-                f"Variational Browser {label} not executed",
+                f"{vlabel} {label} not executed",
                 "\n".join([
                     summary,
                     "Virtual/DB position was not changed.",
