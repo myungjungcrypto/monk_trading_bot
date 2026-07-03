@@ -47,6 +47,26 @@ class VariationalSettings(BaseSettings):
         default=True,
         description="If true, sign+log but do not POST orders to the exchange.",
     )
+    transport: str = Field(
+        default="curl",
+        description="HTTP transport: 'curl' (curl_cffi impersonation), 'browser' "
+        "(Playwright fetch-in-page, most robust vs Cloudflare), or 'httpx' (tests).",
+    )
+    browser_headless: bool = Field(
+        default=True,
+        description="Run the 'browser' transport headless. Set false to solve an "
+        "interactive Cloudflare challenge by hand once.",
+    )
+    browser_executable: str = Field(
+        default="",
+        description="Path to an existing Chromium/Chrome binary for the 'browser' "
+        "transport. Empty uses Playwright's managed browser (needs `playwright install`).",
+    )
+    browser_user_data_dir: str = Field(
+        default="",
+        description="Persistent browser profile dir. Set it so Cloudflare clearance "
+        "and login session survive bot restarts. Empty uses a fresh profile each run.",
+    )
     impersonate: str = Field(
         default="chrome",
         description="curl_cffi browser to impersonate for Cloudflare (e.g. 'chrome'). "

@@ -45,7 +45,8 @@ def _settings(**overrides) -> VariationalSettings:
         endpoint_map="does-not-exist.json",  # use verified defaults
         dry_run=True,
         max_slippage=0.0005,
-        impersonate="",  # use httpx so respx can mock the backend
+        transport="httpx",  # use httpx so respx can mock the backend
+        impersonate="",
     )
     base.update(overrides)
     return VariationalSettings(**base)

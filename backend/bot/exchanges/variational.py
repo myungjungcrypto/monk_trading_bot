@@ -118,11 +118,18 @@ class VariationalConnector(BaseExchange):
     async def connect(self) -> None:
         if self._client is None:
             self._client = build_transport(
+                transport=self.settings.transport,
                 impersonate=self.settings.impersonate,
                 origin=self.settings.api_base.rstrip("/"),
                 user_agent=self.settings.user_agent,
                 cf_clearance=self.settings.cf_clearance,
+                headless=self.settings.browser_headless,
+                executable_path=self.settings.browser_executable,
+                user_data_dir=self.settings.browser_user_data_dir,
             )
+            # Browser transport needs async startup (launch + Cloudflare clear).
+            if hasattr(self._client, "astart"):
+                await self._client.astart()
         self._load_endpoint_map()
         self._address = self._derive_address()
         # The web client stamps every request with the connected address.

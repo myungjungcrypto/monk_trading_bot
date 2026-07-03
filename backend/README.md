@@ -150,26 +150,38 @@ login + quote flow live and logs the exact order body without submitting it.
 
 The Omni host is behind Cloudflare. A plain HTTP client gets a `403 "Just a
 moment..."` challenge because its TLS/HTTP2 fingerprint doesn't match a browser.
-The connector handles this in layers:
+Pick a transport via `VARIATIONAL_TRANSPORT`:
 
-1. **curl_cffi impersonation (default).** With `VARIATIONAL_IMPERSONATE=chrome`
-   (and `pip install curl_cffi`), requests use Chrome's TLS fingerprint, which
-   passes fingerprint-based challenges **without running a browser**. This is the
-   primary transport; httpx is only the fallback (and what the tests mock).
+**`curl` (default, fastest).** curl_cffi impersonates Chrome's TLS fingerprint,
+passing *fingerprint-based* challenges **without a browser**. Try this first.
 
-2. **cf_clearance cookie (fallback).** If the host runs a full JS challenge that
-   impersonation can't pass, solve it once with a real browser **on the server**
-   and reuse the cookie:
+**`browser` (most robust).** If `curl` still 403s — meaning Cloudflare is running
+an interactive JS challenge — switch to the Playwright transport. It runs a
+persistent headless Chromium, clears Cloudflare on the initial page load (JS +
+`cf_clearance`), and then makes every API call via `fetch()` **inside the page**,
+so requests are indistinguishable from the web client. Crucially it does **no DOM
+clicking** — the original slowness came from clicking, not from the browser — so
+it's still fast, and it logs in once and stays open.
 
-   ```bash
-   pip install playwright && python -m playwright install chromium
-   python -m tools.cf_bootstrap            # prints cf_clearance + user-agent
-   # paste both into .env: VARIATIONAL_CF_CLEARANCE=... / VARIATIONAL_USER_AGENT=...
-   ```
+```bash
+# on the server:
+pip install playwright && python -m playwright install chromium
+# in .env:
+VARIATIONAL_TRANSPORT=browser
+VARIATIONAL_BROWSER_USER_DATA_DIR=/home/ec2-user/.monk_variational_profile   # keeps clearance across restarts
+# optional: reuse an existing Chrome instead of `playwright install`:
+# VARIATIONAL_BROWSER_EXECUTABLE=/usr/bin/chromium-browser
+```
 
-   `cf_clearance` is bound to the solving IP, so run `cf_bootstrap` on the same
-   server the bot runs on. It expires (~30 min–hours); re-run when auth 403s.
+If an interactive challenge needs solving by hand once, set
+`VARIATIONAL_BROWSER_HEADLESS=false`, solve it in the visible window, and the
+`cf_clearance` persists in the profile dir for headless runs afterward.
 
-The connector raises a clear, actionable error (naming curl_cffi and
-`cf_bootstrap`) whenever it detects a Cloudflare interstitial, so you always know
-which layer to reach for.
+**`cf_clearance` cookie (curl + a captured cookie).** A middle option: obtain a
+`cf_clearance` with `python -m tools.cf_bootstrap` (run **on the server** — the
+cookie is IP-bound) and set `VARIATIONAL_CF_CLEARANCE` + `VARIATIONAL_USER_AGENT`.
+It expires in ~30 min–hours; the `browser` transport with a persistent profile is
+lower-maintenance.
+
+The connector detects a Cloudflare interstitial and raises an actionable error
+naming these options, so you always know which layer to reach for.
