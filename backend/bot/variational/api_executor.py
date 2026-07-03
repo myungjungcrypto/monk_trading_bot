@@ -75,6 +75,7 @@ class VariationalApiExecutor:
         self,
         settings=None,
         connector_factory: Optional[Callable[[], VariationalConnector]] = None,
+        notifier=None,
     ):
         self._settings = settings or get_variational_settings()
         self._connector_factory = connector_factory or (
@@ -82,6 +83,13 @@ class VariationalApiExecutor:
         )
         self._connector: Optional[VariationalConnector] = None
         self._connect_lock = asyncio.Lock()
+        # Session keepalive: the bot only touches the API on a (rare) signal, so
+        # an idle JWT/Cloudflare expiry would only surface at the worst moment.
+        # A periodic probe keeps the session warm and detects breakage early.
+        self._notifier = notifier
+        self._health_task: Optional[asyncio.Task] = None
+        self._session_healthy = True
+        self._in_flight = 0  # order batches currently executing (probe defers to them)
 
     # -- lifecycle ----------------------------------------------------------
     async def _ensure_connected(self) -> VariationalConnector:
@@ -96,11 +104,100 @@ class VariationalApiExecutor:
         return self._connector
 
     async def aclose(self) -> None:
+        await self.stop_healthcheck()
         if self._connector is not None:
             try:
                 await self._connector.close()
             finally:
                 self._connector = None
+
+    # -- session keepalive --------------------------------------------------
+    def start_healthcheck(self) -> None:
+        """Begin the periodic session probe (idempotent). Call after the bot starts."""
+        interval = float(getattr(self._settings, "api_healthcheck_sec", 120) or 0)
+        if interval <= 0 or self._health_task is not None:
+            return
+        self._health_task = asyncio.ensure_future(self._health_loop(interval))
+        logger.info("Variational API session keepalive started (every %.0fs)", interval)
+
+    async def stop_healthcheck(self) -> None:
+        task, self._health_task = self._health_task, None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+    async def _health_loop(self, interval: float) -> None:
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                await self._run_health_check()
+            except asyncio.CancelledError:
+                break
+            except Exception:  # noqa: BLE001 - loop must never die
+                logger.exception("Variational API keepalive loop error")
+
+    async def _run_health_check(self) -> None:
+        # Don't probe/reconnect while an order batch is executing — it shares the
+        # connector/browser, and a reconnect mid-order would disrupt it.
+        if self._in_flight > 0:
+            return
+        try:
+            connector = await self._ensure_connected()
+            await connector.get_position("BTC")  # cheap authenticated call
+            if not self._session_healthy:
+                self._session_healthy = True
+                await self._notify_status(
+                    "Variational API session recovered — probe succeeded again.")
+        except Exception as exc:  # noqa: BLE001
+            await self._handle_unhealthy(exc)
+
+    async def _handle_unhealthy(self, exc: Exception) -> None:
+        logger.warning("Variational API session probe failed: %s", exc)
+        if self._in_flight > 0:
+            return  # an order is running; let it own the connector
+        try:
+            async with self._connect_lock:
+                if self._connector is not None:
+                    try:
+                        await self._connector.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._connector = None
+                connector = self._connector_factory()
+                await connector.connect()
+                self._connector = connector
+            self._session_healthy = True
+            # One status ping per reconnect — infrequent (sessions last hours),
+            # so this is useful observability, not spam.
+            await self._notify_status(
+                "Variational API session auto-reconnected after a failed probe.")
+        except Exception as rexc:  # noqa: BLE001
+            self._session_healthy = False
+            logger.error("Variational API auto-reconnect failed: %s", rexc, exc_info=True)
+            await self._notify_error(
+                "Variational API session DOWN",
+                f"probe error: {exc}\nreconnect failed: {rexc}\n"
+                "New signals will fail to execute. Consider switching Execution "
+                "Mode to Variational Browser until the session is restored.",
+            )
+
+    async def _notify_status(self, text: str) -> None:
+        logger.info(text)
+        if self._notifier is not None:
+            try:
+                await self._notifier.status(text)
+            except Exception:  # noqa: BLE001
+                logger.warning("Telegram status send failed", exc_info=True)
+
+    async def _notify_error(self, title: str, detail: str) -> None:
+        if self._notifier is not None:
+            try:
+                await self._notifier.error(title, detail)
+            except Exception:  # noqa: BLE001
+                logger.warning("Telegram error send failed", exc_info=True)
 
     # -- entry --------------------------------------------------------------
     async def create_entry_requests(
@@ -117,21 +214,25 @@ class VariationalApiExecutor:
             Order(symbol=sym, side=side, size_usd=Decimal(str(size_usd)))
             for sym, side in legs
         ]
-        results = await asyncio.gather(
-            *(connector.place_order(o) for o in orders),
-            return_exceptions=True,
-        )
+        self._in_flight += 1
+        try:
+            results = await asyncio.gather(
+                *(connector.place_order(o) for o in orders),
+                return_exceptions=True,
+            )
 
-        accepted = [
-            isinstance(r, OrderResult) and r.accepted for r in results
-        ]
-        if all(accepted):
-            return self._batch("open", legs, orders, results, status="clicked")
+            accepted = [
+                isinstance(r, OrderResult) and r.accepted for r in results
+            ]
+            if all(accepted):
+                return self._batch("open", legs, orders, results, status="clicked")
 
-        # Partial or total failure: unwind any filled leg so we stay flat.
-        await self._unwind_partial(connector, legs, orders, results)
-        self._log_failures("entry", legs, results)
-        return self._batch("open", legs, orders, results, status="failed")
+            # Partial or total failure: unwind any filled leg so we stay flat.
+            await self._unwind_partial(connector, legs, orders, results)
+            self._log_failures("entry", legs, results)
+            return self._batch("open", legs, orders, results, status="failed")
+        finally:
+            self._in_flight -= 1
 
     async def _unwind_partial(
         self,
@@ -186,23 +287,27 @@ class VariationalApiExecutor:
                 )
             )
 
-        results = await asyncio.gather(
-            *(connector.place_order(o) for o in orders),
-            return_exceptions=True,
-        )
+        self._in_flight += 1
+        try:
+            results = await asyncio.gather(
+                *(connector.place_order(o) for o in orders),
+                return_exceptions=True,
+            )
 
-        statuses: list[str] = []
-        for (sym, _side), res in zip(legs, results):
-            if isinstance(res, OrderResult) and res.accepted:
-                statuses.append("clicked")
-            elif await self._leg_is_flat(connector, sym):
-                # Already closed on the venue (manual/liquidation) — treat as done.
-                statuses.append("external_closed")
-            else:
-                statuses.append("failed")
+            statuses: list[str] = []
+            for (sym, _side), res in zip(legs, results):
+                if isinstance(res, OrderResult) and res.accepted:
+                    statuses.append("clicked")
+                elif await self._leg_is_flat(connector, sym):
+                    # Already closed on the venue (manual/liquidation) — treat as done.
+                    statuses.append("external_closed")
+                else:
+                    statuses.append("failed")
 
-        self._log_failures("close", legs, results)
-        return self._batch("close", legs, orders, results, statuses=statuses)
+            self._log_failures("close", legs, results)
+            return self._batch("close", legs, orders, results, statuses=statuses)
+        finally:
+            self._in_flight -= 1
 
     async def _leg_is_flat(self, connector: VariationalConnector, symbol: str) -> bool:
         try:

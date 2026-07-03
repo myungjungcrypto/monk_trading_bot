@@ -147,6 +147,112 @@ def test_close_marks_external_closed_when_already_flat():
     assert all(c.status == "external_closed" for c in batch.completions)
 
 
+class RecordingNotifier:
+    def __init__(self):
+        self.statuses = []
+        self.errors = []
+
+    async def status(self, text):
+        self.statuses.append(text)
+
+    async def error(self, title, detail=""):
+        self.errors.append((title, detail))
+
+
+def test_healthcheck_probe_healthy_is_silent():
+    conn = FakeConnector()
+    notifier = RecordingNotifier()
+    ex = VariationalApiExecutor(
+        settings=SimpleNamespace(api_healthcheck_sec=1),
+        connector_factory=lambda: conn,
+        notifier=notifier,
+    )
+
+    async def run():
+        await ex._run_health_check()  # probe succeeds
+
+    asyncio.run(run())
+    assert notifier.statuses == [] and notifier.errors == []
+
+
+def test_healthcheck_reconnects_and_alerts_on_probe_failure():
+    # First connector's probe fails; factory hands out a fresh healthy one.
+    bad = FakeConnector(fail_symbols=("BTC",))   # get_position ok, but make probe fail below
+    good = FakeConnector()
+
+    # Make the bad connector's probe raise.
+    async def boom(symbol):
+        raise ExchangeError("session expired", venue="variational")
+    bad.get_position = boom  # type: ignore
+
+    conns = [bad, good]
+    notifier = RecordingNotifier()
+    ex = VariationalApiExecutor(
+        settings=SimpleNamespace(api_healthcheck_sec=1),
+        connector_factory=lambda: conns.pop(0),
+        notifier=notifier,
+    )
+
+    async def run():
+        await ex._ensure_connected()      # connects `bad`
+        await ex._run_health_check()      # probe fails -> reconnect to `good`
+
+    asyncio.run(run())
+    assert ex._connector is good
+    assert bad.closed  # old session torn down
+    assert any("auto-reconnected" in s for s in notifier.statuses)
+    assert notifier.errors == []
+
+
+def test_healthcheck_alerts_when_reconnect_fails():
+    bad = FakeConnector()
+
+    async def boom(symbol):
+        raise ExchangeError("session expired", venue="variational")
+    bad.get_position = boom  # type: ignore
+
+    class DeadConnector(FakeConnector):
+        async def connect(self):
+            raise RuntimeError("cloudflare challenge")
+
+    conns = [bad, DeadConnector()]
+    notifier = RecordingNotifier()
+    ex = VariationalApiExecutor(
+        settings=SimpleNamespace(api_healthcheck_sec=1),
+        connector_factory=lambda: conns.pop(0),
+        notifier=notifier,
+    )
+
+    async def run():
+        await ex._ensure_connected()
+        await ex._run_health_check()
+
+    asyncio.run(run())
+    assert ex._session_healthy is False
+    assert any("session DOWN" in t for t, _ in notifier.errors)
+
+
+def test_healthcheck_defers_while_order_in_flight():
+    conn = FakeConnector()
+
+    async def boom(symbol):
+        raise ExchangeError("should not be called", venue="variational")
+    conn.get_position = boom  # type: ignore
+
+    ex = VariationalApiExecutor(
+        settings=SimpleNamespace(api_healthcheck_sec=1),
+        connector_factory=lambda: conn,
+    )
+
+    async def run():
+        ex._in_flight = 1  # pretend an order batch is running
+        await ex._run_health_check()  # must skip probe entirely
+
+    asyncio.run(run())
+    # No reconnect attempted; connector never even created.
+    assert ex._connector is None
+
+
 def test_connect_is_lazy_and_reused():
     conn = FakeConnector()
     ex = _executor(conn)

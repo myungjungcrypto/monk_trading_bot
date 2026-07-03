@@ -83,6 +83,13 @@ class VariationalSettings(BaseSettings):
         description="Optional cf_clearance cookie for the browser-bootstrap fallback "
         "(tools/cf_bootstrap.py). Only valid from the IP that solved the challenge.",
     )
+    api_healthcheck_sec: float = Field(
+        default=120.0,
+        description="Session keepalive interval (seconds) for the API executor. A "
+        "lightweight authenticated call keeps the session warm and detects JWT/"
+        "Cloudflare expiry while idle, triggering auto-reconnect + a Telegram "
+        "alert. 0 disables the keepalive.",
+    )
 
     @property
     def endpoint_map_path(self) -> Path:

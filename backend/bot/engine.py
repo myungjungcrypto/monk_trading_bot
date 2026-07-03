@@ -135,7 +135,7 @@ class BotEngine:
         if self.execution_mode == EXECUTION_VARIATIONAL_BROWSER:
             self.variational_bridge = VariationalBrowserRequestBridge()
         elif self.execution_mode == EXECUTION_VARIATIONAL_API:
-            self.variational_bridge = VariationalApiExecutor()
+            self.variational_bridge = VariationalApiExecutor(notifier=self.telegram)
 
         if self._uses_virtual_positions:
             # Repeated averaging/reduction alerts are not useful before live orders.
@@ -546,6 +546,11 @@ class BotEngine:
         await self._validate_live_execution()
         await self._restore_open_trades()
         self._running = True
+
+        # Keep the Variational API session warm so idle JWT/Cloudflare expiry is
+        # caught (and auto-reconnected) before a signal needs it.
+        if self.variational_bridge is not None and hasattr(self.variational_bridge, "start_healthcheck"):
+            self.variational_bridge.start_healthcheck()
         if self.telegram:
             await self.telegram.status(
                 f"Bot started: mode={self.config.trading_mode}, "
