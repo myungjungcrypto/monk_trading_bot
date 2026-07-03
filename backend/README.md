@@ -12,20 +12,30 @@ This backend talks to the **same JSON backend the Omni web client uses**, so bot
 legs fire concurrently (`asyncio.gather`) with millisecond-level skew instead of
 seconds.
 
-### Why it isn't just "call the REST API"
+### The actual API (verified from a real HAR capture, 2026-07-03)
 
-Variational does **not** publish a trading API, and Omni is an on-chain
-(Arbitrum) **RFQ** protocol rather than a CEX. Two things follow:
+Variational does **not** publish a trading API, but the Omni web client talks to
+a JSON backend at `https://omni.variational.io/api/*`. The full order flow was
+captured from a live browser session and the connector implements it exactly:
 
-1. **Auth is a wallet signature, not an API key.** We sign a SIWE
-   (Sign-In-With-Ethereum) message with the trading wallet's private key to get a
-   session token.
-2. **A trade is a signed message.** You request a quote (RFQ); the backend
-   returns the exact terms; you sign them with **EIP-712** typed data and submit
-   the signature. The OLP settles it.
+1. **Auth** — `POST /api/auth/generate_signing_data {address}` returns a
+   SIWE message (text/plain, ~60s expiry); `personal_sign` it with the trading
+   wallet key; `POST /api/auth/login {address, signed_message}` (signature hex
+   **without** `0x`) returns a session JWT. Every request also carries a
+   `vr-connected-address` header.
+2. **Trade** — `POST /api/quotes/indicative` with the instrument
+   (`{underlying, instrument_type: "perpetual_future", settlement_asset: "USDC",
+   funding_interval_s: 3600}`) and a **base-asset qty** returns a short-lived
+   `quote_id`; `POST /api/orders/new/market {quote_id, side, max_slippage,
+   is_reduce_only}` executes it. **No per-order wallet signature** — the session
+   token is enough.
+3. **State** — `GET /api/positions` (signed qty: >0 long, <0 short),
+   `GET /api/portfolio?compute_margin=true` (balance/uPnL),
+   `GET /api/funding/v2` (funding rate).
 
-Because the surface is undocumented, we **do not hard-code guessed endpoints**.
-We capture the real flow from the browser and load it from an *endpoint map*.
+The connector converts USD notional to base qty via a discovery quote's mark
+price, submits immediately after quoting (quotes expire in seconds), and
+re-authenticates automatically on a 401.
 
 ## The capture workflow (bridge from clicking → API)
 
@@ -100,7 +110,8 @@ backend/
 │       ├── base.py               # BaseExchange abstraction (all venues)
 │       └── variational.py        # Variational direct-API connector (SIWE + RFQ + EIP-712)
 ├── tools/
-│   └── har_extractor.py          # HAR → endpoint map (the capture bridge)
+│   ├── har_extractor.py          # HAR → endpoint map (the capture bridge)
+│   └── smoke_test.py             # live check: login + balance + quotes + dry-run pair order
 ├── config/
 │   └── variational_endpoints.sample.json
 ├── tests/                        # pytest suite (respx-mocked, no network/funds)
@@ -119,20 +130,21 @@ python -m pytest -q
 The suite mocks the HTTP backend with `respx` and signs with a throwaway public
 test key, so it touches **no network and no funds**.
 
-## Status / what still needs a real capture
+## Status
 
-The connector's structure (auth handshake, RFQ→sign→submit, positions, market
-data, dry-run gate) is complete and tested against mocks. The following are
-best-effort defaults that must be confirmed against a real HAR capture before
-live trading, because the API is undocumented:
+Endpoints, payload shapes, and the auth flow are **verified against a real HAR
+capture (2026-07-03)** — see `config/variational_endpoints.sample.json`. Two
+things remain unverifiable from a (Chrome-sanitized) HAR and get confirmed on
+the first dry-run against the live backend:
 
-- Exact endpoint **paths** and **HTTP methods** (in `_DEFAULT_PATHS`).
-- The **SIWE message** format Omni expects (`_build_siwe_message`).
-- The **EIP-712 typed data** for a trade — the connector expects the RFQ response
-  to carry it (`typed_data` / `eip712`); confirm the field name and whether the
-  client must construct it instead.
-- The **listing symbols** (`_SYMBOL_MAP`) and response field names for
-  positions/mark price.
+- **JWT transport** — Chrome strips `Cookie`/`Authorization` from HAR exports,
+  so the connector sends the login token as `Authorization: Bearer` (standard)
+  and also keeps any `Set-Cookie` the server returns. A 401 triggers one
+  automatic re-login; if it persists, the token travels some other way — capture
+  again with a proxy (e.g. mitmproxy) instead of DevTools.
+- **Cloudflare** — the host runs Cloudflare's JS challenge for page loads. If
+  server-side API calls get challenged (403 with `cdn-cgi` in the body), try the
+  documented client-API host in `VARIATIONAL_API_BASE` (see `.env.example`).
 
-Run the capture workflow, regenerate the endpoint map, and adjust these in one
-place. The tests document the expected shapes.
+Keep `VARIATIONAL_DRY_RUN=true` for the first run: it performs the full
+login + quote flow live and logs the exact order body without submitting it.

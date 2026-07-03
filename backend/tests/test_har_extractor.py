@@ -93,6 +93,17 @@ def test_classify_maps_paths_to_actions():
     assert hx.classify("/static/app.js") is None
 
 
+def test_classify_filters_noise():
+    # Cloudflare challenge machinery and asset files with keyword-y names.
+    assert hx.classify("/cdn-cgi/challenge-platform/h/b/jsd/oneshot/xyz") is None
+    assert hx.classify("/_app/immutable/assets/TradesTable.3kj1H4vd.css") is None
+    assert hx.classify("/orders.js") is None
+    # Real API paths still classify.
+    assert hx.classify("/api/orders/new/market") == "order_submit"
+    assert hx.classify("/api/auth/generate_signing_data") == "auth_login"
+    assert hx.classify("/api/quotes/indicative") == "rfq"
+
+
 def test_templatize_preserves_shape_and_types():
     body = {"listing": "BTC", "size": 500, "leverage": 3.0, "flag": True, "sig": "0x" + "a" * 130}
     t = hx.templatize(body)

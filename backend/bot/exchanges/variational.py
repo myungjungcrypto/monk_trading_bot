@@ -9,39 +9,58 @@ entry is already skewed by the time both fills land. This connector talks to the
 same JSON backend the web client uses, so both legs can be fired concurrently
 with millisecond-level skew instead of seconds.
 
-What Variational actually is
-----------------------------
-Omni is an on-chain (Arbitrum) RFQ derivatives protocol, not a CEX. There is no
-API key/secret. Two consequences shape this connector:
+The actual API (verified against a browser HAR capture, 2026-07-03)
+-------------------------------------------------------------------
+Base URL: https://omni.variational.io (the app host; all paths under /api).
 
-1. **Auth is a wallet signature.** We sign a SIWE (Sign-In-With-Ethereum)
-   message with the trading wallet's private key to obtain a session token.
+Auth — wallet signature, session token afterwards:
+  1. POST /api/auth/generate_signing_data  {"address": "0x..."}
+     -> text/plain SIWE message (server builds it, incl. nonce + 60s expiry).
+  2. personal_sign that exact text with the trading wallet key.
+  3. POST /api/auth/login  {"address": "0x...", "signed_message": "<hex, NO 0x>"}
+     -> {"token": "<JWT>", ...}
+  The web client also sends a `vr-connected-address: <address>` header on every
+  request. The HAR was cookie/authorization-sanitized by Chrome, so whether the
+  JWT travels as `Authorization: Bearer` or a cookie is not directly visible; we
+  send the bearer header, keep any cookies httpx receives, and re-authenticate
+  automatically on a 401.
 
-2. **A trade is a signed message, not just an HTTP body.** You request a quote
-   (RFQ), the backend returns the exact terms to sign, you sign them with EIP-712
-   typed data, and submit the signature. The backend/OLP settles it.
+Trading — RFQ then market order, NO per-order wallet signature:
+  1. POST /api/quotes/indicative
+       {"instrument": {"underlying": "ETH", "instrument_type": "perpetual_future",
+                       "settlement_asset": "USDC", "funding_interval_s": 3600},
+        "qty": "<base-asset qty, string>"}
+     -> {"quote_id": "...", "bid": "...", "ask": "...", "mark_price": "...", ...}
+  2. POST /api/orders/new/market
+       {"quote_id": "...", "side": "buy"|"sell", "max_slippage": 0.0002,
+        "is_reduce_only": false}
+     -> {"rfq_id": "...", ...}
+  Quotes expire quickly (the web client re-quotes every ~1s), so we submit
+  immediately after quoting. Order qty is in the BASE ASSET; the connector
+  converts from USD notional using the mark price of a discovery quote.
 
-Undocumented surface
---------------------
-Variational's trading API is not published. The exact paths, headers, and JSON
-shapes are therefore *not hard-coded here* — they are loaded from an endpoint map
-produced by ``tools/har_extractor.py`` against a real browser capture. Methods
-below use that map (with documented fallbacks) and raise a clear error when a
-required endpoint has not been captured yet. This keeps the connector honest:
-it never silently guesses a payload.
+Positions / account:
+  GET /api/positions                      -> list with position_info{instrument,
+                                             qty (signed), avg_entry_price}, upnl
+  GET /api/portfolio?compute_margin=true  -> {"balance": "...", "upnl": "..."}
+  GET /api/funding/v2?underlying=X&instrument_type=perpetual_future
 
 Safety
 ------
-``VARIATIONAL_DRY_RUN=true`` (the default) signs and logs every request but does
-not POST orders. Flip it off only after verifying payloads against a capture.
+``VARIATIONAL_DRY_RUN=true`` (the default) runs the full auth + quote flow but
+logs the final order request instead of POSTing it. Flip it off only after the
+dry-run output looks right.
+
+Operational note: the host sits behind Cloudflare. If server-side requests get
+challenged (403 from cdn-cgi), the fallback is the documented client-API host —
+see VARIATIONAL_API_BASE in .env.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from typing import Any, Optional
 
 import httpx
@@ -67,23 +86,32 @@ def _http2_available() -> bool:
     except ImportError:
         return False
 
-# Documented/known fallbacks used when the endpoint map lacks an entry. These are
-# best-effort defaults; the HAR capture is the source of truth.
+
+# Verified against HAR capture 2026-07-03. An endpoint map produced by
+# tools/har_extractor.py can still override these (e.g. after a frontend update).
 _DEFAULT_PATHS: dict[str, tuple[str, str]] = {
-    # category -> (method, path)
-    "auth_nonce": ("GET", "/auth/nonce"),
-    "auth_login": ("POST", "/auth/login"),
-    "rfq": ("POST", "/rfq"),
-    "order_submit": ("POST", "/order"),
-    "position": ("GET", "/positions"),
-    "market_data": ("GET", "/market/statistics"),
+    "auth_signing_data": ("POST", "/api/auth/generate_signing_data"),
+    "auth_login": ("POST", "/api/auth/login"),
+    "rfq": ("POST", "/api/quotes/indicative"),
+    "order_submit": ("POST", "/api/orders/new/market"),
+    "position": ("GET", "/api/positions"),
+    "portfolio": ("GET", "/api/portfolio"),
+    "funding": ("GET", "/api/funding/v2"),
 }
 
-# Canonical symbol -> Variational perp listing symbol. Confirm against a capture.
-_SYMBOL_MAP = {
-    "BTC": "BTC_USDC_PERP",
-    "ETH": "ETH_USDC_PERP",
-}
+# Small base-asset qty used for price-discovery quotes (indicative only, no order).
+_DISCOVERY_QTY = Decimal("0.001")
+
+# Base-asset quantities are sent as strings; the web client sends up to 18 dp.
+_QTY_PRECISION = Decimal("1e-9")
+
+
+def _fmt_qty(qty: Decimal) -> str:
+    """Format a Decimal qty without exponent or trailing zeros ("0.25", not "2.5E-1")."""
+    s = format(qty, "f")
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return s or "0"
 
 
 class VariationalConnector(BaseExchange):
@@ -105,26 +133,27 @@ class VariationalConnector(BaseExchange):
                 # HTTP/2 multiplexes both pair legs over one connection, shaving
                 # latency — but only if the optional `h2` package is present.
                 http2=_http2_available(),
-                headers={"content-type": "application/json"},
+                headers={
+                    "content-type": "application/json",
+                    "accept": "*/*",
+                },
             )
         self._load_endpoint_map()
         self._address = self._derive_address()
+        # The web client stamps every request with the connected address.
+        self._client.headers["vr-connected-address"] = self._address
         await self.authenticate()
 
     async def close(self) -> None:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+        self._session_token = None
 
     # -- endpoint map -------------------------------------------------------
     def _load_endpoint_map(self) -> None:
         path = self.settings.endpoint_map_path
         if not path.exists():
-            logger.warning(
-                "Endpoint map %s not found; using documented fallbacks. Capture a "
-                "real order flow with tools/har_extractor.py for accurate payloads.",
-                path,
-            )
             self._endpoint_map = {}
             return
         with open(path, "r", encoding="utf-8") as fh:
@@ -132,26 +161,17 @@ class VariationalConnector(BaseExchange):
         logger.info("Loaded Variational endpoint map from %s", path)
 
     def _endpoint(self, category: str) -> tuple[str, str]:
-        """Resolve (method, url_path) for a logical action from the map or fallback."""
+        """Resolve (method, url_path) for a logical action from the map or default."""
         entries = (self._endpoint_map.get("endpoints") or {}).get(category)
         if entries:
             first = entries[0]
             return first.get("method", "POST"), first.get("path") or first.get("url")
         if category in _DEFAULT_PATHS:
             return _DEFAULT_PATHS[category]
-        raise ExchangeError(
-            f"No endpoint known for '{category}'. Capture it with har_extractor "
-            f"and set VARIATIONAL_ENDPOINT_MAP.",
-            venue=self.name,
-        )
+        raise ExchangeError(f"No endpoint known for '{category}'.", venue=self.name)
 
     # -- signing ------------------------------------------------------------
     def _account(self):
-        """Return an eth_account LocalAccount, importing lazily.
-
-        eth-account is only needed when actually signing, so the module (and the
-        HAR tooling) import fine without it installed.
-        """
         if not self.settings.private_key or self.settings.private_key.strip("0x") == "":
             raise ExchangeError("VARIATIONAL_PRIVATE_KEY is not set.", venue=self.name)
         try:
@@ -167,183 +187,198 @@ class VariationalConnector(BaseExchange):
         return self._account().address
 
     def _personal_sign(self, message: str) -> str:
+        """personal_sign the message; return hex WITHOUT the 0x prefix.
+
+        The captured login request carries a 130-char unprefixed hex signature.
+        """
         from eth_account.messages import encode_defunct
 
         acct = self._account()
         signed = acct.sign_message(encode_defunct(text=message))
-        return signed.signature.hex()
+        sig = signed.signature.hex()
+        return sig[2:] if sig.startswith("0x") else sig
 
-    def _sign_typed_data(self, typed_data: dict[str, Any]) -> str:
-        """EIP-712 sign a full typed-data document (domain/types/message).
-
-        The RFQ response is expected to include the exact typed data to sign;
-        that avoids us reconstructing the domain/types by hand from guesses.
-        """
-        from eth_account import Account
-
-        acct = self._account()
-        # eth-account >=0.13 exposes sign_typed_data(full_message=...).
-        signed = acct.sign_typed_data(full_message=typed_data)
-        return signed.signature.hex()
-
-    # -- auth (SIWE) --------------------------------------------------------
+    # -- auth ----------------------------------------------------------------
     async def authenticate(self) -> None:
-        """Obtain a session token via Sign-In-With-Ethereum.
+        """Sign the server-provided SIWE message and exchange it for a session JWT.
 
-        Flow (confirm exact shapes against a capture):
-          1. GET auth_nonce -> {"nonce": "..."}
-          2. Build a SIWE message, personal_sign it.
-          3. POST auth_login {message, signature} -> {"token": "..."}  (or cookie)
+        The message has a ~60s expiry and embeds a nonce, so we fetch it fresh and
+        sign immediately. It also embeds Variational's ToS-acceptance wording —
+        the same message a human signs in the wallet popup on first login.
         """
-        assert self._client is not None
-        method, path = self._endpoint("auth_nonce")
-        try:
-            resp = await self._request(method, path)
-        except ExchangeError:
-            logger.warning("Nonce endpoint unavailable; skipping SIWE (public-only mode).")
-            return
-        nonce = self._extract(resp, ("nonce", "data.nonce")) or ""
-        if not nonce:
-            logger.warning("No nonce in response; auth response shape may differ from expectation.")
-            return
+        method, path = self._endpoint("auth_signing_data")
+        resp = await self._request(
+            method, path, json={"address": self._address}, _retry_auth=False
+        )
+        # The endpoint returns text/plain; tolerate a JSON wrapper too.
+        message = resp.get("message") if isinstance(resp, dict) else resp
+        if not isinstance(message, str) or "sign in with your Ethereum account" not in message:
+            raise ExchangeError(
+                "Unexpected signing-data response; frontend API may have changed.",
+                venue=self.name,
+                payload=resp,
+            )
 
-        message = self._build_siwe_message(nonce)
         signature = self._personal_sign(message)
 
         method, path = self._endpoint("auth_login")
         login = await self._request(
-            method, path, json={"message": message, "signature": signature}
+            method,
+            path,
+            json={"address": self._address, "signed_message": signature},
+            _retry_auth=False,
         )
-        token = self._extract(login, ("token", "accessToken", "data.token", "session_token"))
-        if token:
-            self._session_token = token
-            self._client.headers["authorization"] = f"Bearer {token}"
-            logger.info("Variational session established for %s", self._address)
-        else:
-            # Some backends set an httpOnly cookie instead of returning a token;
-            # httpx keeps cookies on the client automatically.
-            logger.info("No bearer token returned; relying on session cookie.")
+        token = self._extract(login, ("token", "access_token"))
+        if not token:
+            raise ExchangeError("Login returned no session token.", venue=self.name, payload=login)
+        self._session_token = token
+        # Chrome sanitizes cookies/authorization out of HAR exports, so the exact
+        # transport of the JWT is unverified. Bearer is the standard guess; any
+        # Set-Cookie the server sends is kept by httpx automatically.
+        assert self._client is not None
+        self._client.headers["authorization"] = f"Bearer {token}"
+        logger.info("Variational session established for %s", self._address)
 
-    def _build_siwe_message(self, nonce: str) -> str:
-        host = httpx.URL(self.settings.api_base).host
-        issued_at = self._utcnow_iso()
-        return (
-            f"{host} wants you to sign in with your Ethereum account:\n"
-            f"{self._address}\n\n"
-            f"Sign in to Variational Omni.\n\n"
-            f"URI: {self.settings.api_base}\n"
-            f"Version: 1\n"
-            f"Chain ID: {self.settings.chain_id}\n"
-            f"Nonce: {nonce}\n"
-            f"Issued At: {issued_at}"
-        )
-
-    @staticmethod
-    def _utcnow_iso() -> str:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-
-    # -- trading ------------------------------------------------------------
-    async def place_order(self, order: Order) -> OrderResult:
-        """RFQ -> sign -> submit for a single leg.
-
-        Returns a normalized :class:`OrderResult`. In dry-run mode the request is
-        signed and logged but not POSTed.
-        """
-        listing = self._listing(order.symbol)
-
-        # 1. Request a quote for this side/size.
-        quote = await self.request_quote(listing, order.side, order.size_usd)
-
-        # 2. The quote carries the EIP-712 terms to sign (typical RFQ design).
-        typed_data = self._extract(quote, ("typed_data", "eip712", "data.typed_data"))
-        signature = self._sign_typed_data(typed_data) if typed_data else None
-
-        submit_body: dict[str, Any] = {
-            "listing": listing,
-            "side": order.side.value,
-            "size_usd": str(order.size_usd),
-            "reduce_only": order.reduce_only,
-            "quote_id": self._extract(quote, ("quote_id", "id", "data.quote_id")),
+    # -- market data ----------------------------------------------------------
+    def _instrument(self, symbol: str) -> dict[str, Any]:
+        # funding_interval_s=3600 confirmed for BTC and ETH perps in the capture.
+        return {
+            "underlying": symbol.upper(),
+            "instrument_type": "perpetual_future",
+            "settlement_asset": "USDC",
+            "funding_interval_s": 3600,
         }
-        if signature is not None:
-            submit_body["signature"] = signature
-        if order.client_id:
-            submit_body["client_id"] = order.client_id
 
+    async def request_quote(self, symbol: str, qty: Decimal) -> dict[str, Any]:
+        """POST an indicative RFQ; the response carries quote_id/bid/ask/mark."""
+        method, path = self._endpoint("rfq")
+        body = {"instrument": self._instrument(symbol), "qty": _fmt_qty(qty)}
+        resp = await self._request(method, path, json=body)
+        if not isinstance(resp, dict) or "quote_id" not in resp:
+            raise ExchangeError("Unexpected RFQ response shape.", venue=self.name, payload=resp)
+        return resp
+
+    async def get_mark_price(self, symbol: str) -> Decimal:
+        quote = await self.request_quote(symbol, _DISCOVERY_QTY)
+        price = self._as_decimal(quote.get("mark_price"))
+        if price is None:
+            raise ExchangeError(f"No mark price for {symbol}.", venue=self.name, payload=quote)
+        return price
+
+    # -- trading --------------------------------------------------------------
+    async def place_order(self, order: Order) -> OrderResult:
+        """Discovery quote (USD -> base qty) -> real quote -> market order.
+
+        Quotes expire in seconds, so the submit follows the quote immediately.
+        """
+        mark = await self.get_mark_price(order.symbol)
+        qty = (order.size_usd / mark).quantize(_QTY_PRECISION, rounding=ROUND_DOWN)
+        if qty <= 0:
+            raise ExchangeError(
+                f"size_usd {order.size_usd} too small for {order.symbol} at {mark}.",
+                venue=self.name,
+            )
+        quote = await self.request_quote(order.symbol, qty)
+        return await self._submit_market(order, quote)
+
+    async def _submit_market(self, order: Order, quote: dict[str, Any]) -> OrderResult:
+        # Buys cross the ask, sells hit the bid — best estimate of the fill.
+        est_price = self._as_decimal(
+            quote.get("ask") if order.side is Side.BUY else quote.get("bid")
+        )
+        body = {
+            "quote_id": quote["quote_id"],
+            "side": order.side.value,
+            "max_slippage": float(self.settings.max_slippage),
+            "is_reduce_only": order.reduce_only,
+        }
         method, path = self._endpoint("order_submit")
 
         if self.settings.dry_run:
-            logger.info(
-                "[DRY-RUN] %s %s body=%s", method, path, json.dumps(submit_body)[:400]
-            )
+            logger.info("[DRY-RUN] %s %s body=%s", method, path, json.dumps(body))
             return OrderResult(
                 accepted=True, venue=self.name, symbol=order.symbol, side=order.side,
-                size_usd=order.size_usd, dry_run=True, raw={"submit_body": submit_body},
+                size_usd=order.size_usd, filled_price=est_price, dry_run=True,
+                raw={"submit_body": body, "quote": quote},
             )
 
-        resp = await self._request(method, path, json=submit_body)
+        resp = await self._request(method, path, json=body)
+        rfq_id = self._extract(resp, ("rfq_id", "order_id", "id"))
         return OrderResult(
-            accepted=bool(self._extract(resp, ("accepted", "success")) is not False),
+            accepted=rfq_id is not None,
             venue=self.name,
             symbol=order.symbol,
             side=order.side,
             size_usd=order.size_usd,
-            filled_price=self._as_decimal(self._extract(resp, ("fill_price", "price"))),
-            order_id=self._extract(resp, ("order_id", "id", "trade_id")),
+            filled_price=est_price,
+            order_id=rfq_id,
             raw=resp if isinstance(resp, dict) else {"raw": resp},
         )
 
-    async def request_quote(self, listing: str, side: Side, size_usd: Decimal) -> dict[str, Any]:
-        method, path = self._endpoint("rfq")
-        body = {"listing": listing, "side": side.value, "size_usd": str(size_usd)}
-        resp = await self._request(method, path, json=body)
-        if not isinstance(resp, dict):
-            raise ExchangeError("Unexpected RFQ response shape.", venue=self.name, payload=resp)
-        return resp
-
     async def get_position(self, symbol: str) -> Optional[Position]:
-        listing = self._listing(symbol)
         method, path = self._endpoint("position")
         resp = await self._request(method, path)
-        rows = resp.get("positions", resp) if isinstance(resp, dict) else resp
-        if not isinstance(rows, list):
-            return None
-        for row in rows:
-            if row.get("listing") in (listing, symbol):
-                size = self._as_decimal(row.get("size")) or Decimal(0)
-                if size == 0:
-                    return None
-                return Position(
-                    symbol=symbol,
-                    side=Side.BUY if size > 0 else Side.SELL,
-                    size=abs(size),
-                    entry_price=self._as_decimal(row.get("entry_price")) or Decimal(0),
-                    unrealized_pnl=self._as_decimal(row.get("unrealized_pnl")) or Decimal(0),
-                    raw=row,
-                )
+        if not isinstance(resp, list):
+            raise ExchangeError("Unexpected positions response.", venue=self.name, payload=resp)
+        for row in resp:
+            info = row.get("position_info") or {}
+            instrument = info.get("instrument") or {}
+            if instrument.get("underlying") != symbol.upper():
+                continue
+            qty = self._as_decimal(info.get("qty")) or Decimal(0)
+            if qty == 0:
+                return None
+            return Position(
+                symbol=symbol.upper(),
+                side=Side.BUY if qty > 0 else Side.SELL,
+                size=abs(qty),
+                entry_price=self._as_decimal(info.get("avg_entry_price")) or Decimal(0),
+                unrealized_pnl=self._as_decimal(row.get("upnl")) or Decimal(0),
+                raw=row,
+            )
         return None
 
-    async def get_mark_price(self, symbol: str) -> Decimal:
-        listing = self._listing(symbol)
-        method, path = self._endpoint("market_data")
-        resp = await self._request(method, path)
-        rows = resp.get("markets", resp) if isinstance(resp, dict) else resp
-        if isinstance(rows, list):
-            for row in rows:
-                if row.get("listing") in (listing, symbol):
-                    price = self._as_decimal(row.get("mark_price") or row.get("price"))
-                    if price is not None:
-                        return price
-        raise ExchangeError(f"No mark price for {symbol}.", venue=self.name, payload=resp)
+    async def close_position(self, symbol: str) -> Optional[OrderResult]:
+        """Flatten using the exact base-asset qty from the venue (no USD roundtrip)."""
+        pos = await self.get_position(symbol)
+        if pos is None:
+            return None
+        quote = await self.request_quote(symbol, pos.size)
+        notional = pos.size * (self._as_decimal(quote.get("mark_price")) or pos.entry_price)
+        order = Order(
+            symbol=symbol,
+            side=pos.side.opposite,
+            size_usd=notional,
+            reduce_only=True,
+        )
+        return await self._submit_market(order, quote)
+
+    async def get_balance(self) -> dict[str, Decimal]:
+        """USDC balance and account-level uPnL from the portfolio endpoint."""
+        method, path = self._endpoint("portfolio")
+        resp = await self._request(method, path, params={"compute_margin": "true"})
+        return {
+            "balance": self._as_decimal(self._extract(resp, ("balance",))) or Decimal(0),
+            "upnl": self._as_decimal(self._extract(resp, ("upnl",))) or Decimal(0),
+        }
 
     # -- HTTP plumbing ------------------------------------------------------
-    async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+    async def _request(
+        self, method: str, path: str, *, _retry_auth: bool = True, **kwargs: Any
+    ) -> Any:
         if self._client is None:
             raise ExchangeError("Connector not connected; call connect().", venue=self.name)
         try:
             resp = await self._client.request(method, path, **kwargs)
         except httpx.HTTPError as exc:
             raise ExchangeError(f"HTTP error on {method} {path}: {exc}", venue=self.name) from exc
+
+        # Session JWTs expire; transparently re-login once and retry.
+        if resp.status_code == 401 and _retry_auth:
+            logger.info("401 on %s %s — re-authenticating.", method, path)
+            await self.authenticate()
+            return await self._request(method, path, _retry_auth=False, **kwargs)
+
         if resp.status_code >= 400:
             raise ExchangeError(
                 f"{method} {path} -> {resp.status_code}: {resp.text[:300]}",
@@ -355,12 +390,10 @@ class VariationalConnector(BaseExchange):
         try:
             return resp.json()
         except ValueError:
+            # e.g. generate_signing_data returns text/plain.
             return resp.text
 
     # -- helpers ------------------------------------------------------------
-    def _listing(self, symbol: str) -> str:
-        return _SYMBOL_MAP.get(symbol.upper(), symbol)
-
     @staticmethod
     def _as_decimal(value: Any) -> Optional[Decimal]:
         if value is None or value == "":

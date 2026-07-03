@@ -58,9 +58,18 @@ IGNORED_HEADERS = {
 }
 
 
+# Pure noise: CDN challenge machinery and static assets whose names happen to
+# contain keywords (e.g. TradesTable.css matching "trade").
+NOISE_PATH_PREFIXES = ("/cdn-cgi/", "/_app/", "/static/", "/assets/")
+NOISE_EXTENSIONS = (".js", ".css", ".map", ".png", ".jpg", ".svg", ".ico",
+                    ".woff", ".woff2", ".ttf", ".html")
+
+
 def classify(path: str) -> Optional[str]:
     """Map a URL path to a logical action, or None if it looks uninteresting."""
     low = path.lower()
+    if low.startswith(NOISE_PATH_PREFIXES) or low.endswith(NOISE_EXTENSIONS):
+        return None
     for category, keywords in CATEGORY_KEYWORDS:
         if any(kw in low for kw in keywords):
             return category

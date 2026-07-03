@@ -30,10 +30,15 @@ class VariationalSettings(BaseSettings):
         description="Trading wallet private key (0x-prefixed hex). Never commit.",
     )
     api_base: str = Field(
-        default="https://omni-client-api.prod.ap-northeast-1.variational.io",
-        description="Omni web-client backend base URL.",
+        default="https://omni.variational.io",
+        description="Backend base URL the Omni web client talks to (paths under /api). "
+        "Verified via HAR capture 2026-07-03.",
     )
     chain_id: int = Field(default=42161, description="Arbitrum One.")
+    max_slippage: float = Field(
+        default=0.0005,
+        description="max_slippage sent with market orders (fraction; web UI used 0.0002).",
+    )
     endpoint_map: str = Field(
         default="config/variational_endpoints.json",
         description="Path (relative to backend/) to the HAR-derived endpoint map.",
