@@ -30,8 +30,17 @@ NOISY_PATHS = {
     "/api/metadata/v2/open_interest",
     "/api/ping",
     "/api/quotes/indicative",
+    "/api/quotes/simple",
     "/api/settlement_pools/leverage",
     "/api/version",
+}
+IMPORTANT_PATHS = {
+    "/api/auth/generate_signing_data",
+    "/api/auth/login",
+    "/api/auth/switch",
+    "/api/orders/new/market",
+    "/api/orders/tpsl",
+    "/api/positions",
 }
 NOISY_PREFIXES = (
     "/_app/",
@@ -84,6 +93,8 @@ def analyze_capture(path: Path, *, sample_limit: int, body_chars: int) -> dict:
     non_noisy_request_counts: Counter = Counter()
     response_counts: Counter = Counter()
     non_noisy_post_samples: list[dict] = []
+    important_request_samples: list[dict] = []
+    important_response_samples: list[dict] = []
     ws_sent_samples: list[dict] = []
     contexts: dict[str, RequestContext] = {}
     total_lines = 0
@@ -126,10 +137,19 @@ def analyze_capture(path: Path, *, sample_limit: int, body_chars: int) -> dict:
                     if ctx and len(ctx.candidates) < sample_limit:
                         ctx.candidates.append(sample)
 
+                if is_important_url(str(record.get("url") or "")):
+                    sample = request_sample(record, body_chars=body_chars)
+                    if len(important_request_samples) < sample_limit:
+                        important_request_samples.append(sample)
+
             elif record_type == "http_response":
                 status = str(record.get("status") or "")
                 key = endpoint_key(str(record.get("url") or ""), method=status)
                 response_counts[key] += 1
+                if is_important_url(str(record.get("url") or "")):
+                    sample = response_sample(record, body_chars=body_chars)
+                    if len(important_response_samples) < sample_limit:
+                        important_response_samples.append(sample)
 
             elif record_type == "ws_frame_sent":
                 payload = str(record.get("payload") or "")
@@ -151,6 +171,8 @@ def analyze_capture(path: Path, *, sample_limit: int, body_chars: int) -> dict:
         "non_noisy_request_counts": non_noisy_request_counts,
         "response_counts": response_counts,
         "non_noisy_post_samples": non_noisy_post_samples,
+        "important_request_samples": important_request_samples,
+        "important_response_samples": important_response_samples,
         "ws_sent_samples": ws_sent_samples,
         "contexts": contexts,
     }
@@ -191,6 +213,18 @@ def print_summary(summary: dict, path: Path, *, sample_limit: int) -> None:
             for sample in ctx.ws_candidates[: min(sample_limit, 5)]:
                 print(f"      {sample['ts']} {sample['url']}")
                 print(indent(sample["payload"], "        "))
+
+    print("\n== Important HTTP Requests ==")
+    for sample in summary["important_request_samples"]:
+        print(f"\n--- {sample['ts']} {sample['method']} {sample['url']}")
+        if sample["post_data"]:
+            print(sample["post_data"])
+
+    print("\n== Important HTTP Responses ==")
+    for sample in summary["important_response_samples"]:
+        print(f"\n--- {sample['ts']} {sample['status']} {sample['url']}")
+        if sample["body"]:
+            print(sample["body"])
 
     print("\n== Candidate HTTP Requests ==")
     for sample in summary["non_noisy_post_samples"]:
@@ -247,6 +281,15 @@ def request_sample(record: dict, *, body_chars: int) -> dict:
     }
 
 
+def response_sample(record: dict, *, body_chars: int) -> dict:
+    return {
+        "ts": record.get("ts", ""),
+        "status": record.get("status", ""),
+        "url": record.get("url", ""),
+        "body": str(record.get("body") or "")[:body_chars],
+    }
+
+
 def endpoint_key(url: str, *, method: str = "") -> str:
     parsed = urlparse(url)
     path = parsed.path or url.split("?", 1)[0]
@@ -260,6 +303,10 @@ def is_noisy_url(url: str) -> bool:
     if path in NOISY_PATHS:
         return True
     return any(path.startswith(prefix) for prefix in NOISY_PREFIXES)
+
+
+def is_important_url(url: str) -> bool:
+    return urlparse(url).path in IMPORTANT_PATHS
 
 
 def endpoint_is_noisy_key(key: str) -> bool:

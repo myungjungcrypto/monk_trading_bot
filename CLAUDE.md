@@ -933,6 +933,7 @@ Dashboard HTTPS:
 - `tools/variational-wallet`과 `tools/variational-browser`가 같은 Telegram bot token으로 동시에 polling하면 callback을 서로 가져갈 수 있다. 가능하면 브라우저 승인용 bot token을 분리한다.
 - 2026-06-18: UI click 방식은 BTC leg와 ETH leg 사이에 수십 초~수분 지연이 생겨 실시간 hedge 품질이 낮다. Direct API 전환은 현재 운영 경로를 덮어쓰지 않고, 먼저 `VARIATIONAL_BROWSER_NETWORK_CAPTURE_ENABLED=true`로 기존 browser request 처리 중 Variational same-origin HTTP/WS 요청을 `tools/variational-browser/runtime/network-captures/*.ndjson`에 기록해 주문 payload, auth/session, ack 흐름을 확인하는 단계부터 진행한다. 기본값은 꺼짐이며, headers/response body도 기본 redacted/off다. 실제 주문 시그널을 마냥 기다리지 않기 위해 `backend.scripts.create_variational_browser_request --batch --no-dry-run --size-usd 25`처럼 아주 작은 수동 batch 주문을 생성해 캡처 샘플을 적극적으로 확보할 수 있다. 충분한 캡처 샘플을 확보한 뒤 `variational_api_shadow` 같은 별도 실행 모드에서 dry-run/compare를 거쳐 live direct executor로 넘어간다.
 - 2026-07-03: Variational network capture 파일이 수백 MB까지 커지고 `/api/quotes/indicative` 같은 noisy endpoint가 대부분을 차지한다. `backend.scripts.analyze_variational_capture`를 추가해 endpoint 빈도, request processing window, non-noisy POST, 주문/포지션 관련 WebSocket sent frame 후보만 요약한다. 캡처 원본 전체를 공유하지 말고 이 스크립트 출력 중 주문 후보 payload만 확인한다.
+- 2026-07-03: 캡처 요약에서 `POST /api/orders/new/market`가 실제 market order submit 후보로 확인됐다. Analyzer는 `/api/quotes/simple`도 noise로 제외하고 `orders/new/market`, `orders/tpsl`, `positions`, auth endpoint의 request/response를 별도 `Important HTTP` 섹션에 출력한다.
 - Variational 공식 trading API가 생기면 browser click gate는 제거하고 API execution adapter로 교체하는 것이 최종 목표다.
 
 ### English Explanation: Trading Without a Variational API
