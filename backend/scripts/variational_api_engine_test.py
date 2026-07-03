@@ -126,7 +126,10 @@ async def main(size_usd: float, direction_str: str, live: bool, hold_sec: float)
     else:
         log.info("CLOSED trade_id=%s | closed_trades=%d", trade_id, len(closed))
 
-    # 4) Confirm the venue is flat for our test legs.
+    # 4) Confirm the venue is flat for our test legs. Variational settles via
+    #    RFQ, so /api/positions can lag a few seconds after the close order —
+    #    wait before reading, or an immediate check shows the just-closed legs.
+    await asyncio.sleep(5)
     for sym in ("BTC", "ETH"):
         pos = await connector.get_position(sym)
         log.info("venue position %s: %s", sym,
