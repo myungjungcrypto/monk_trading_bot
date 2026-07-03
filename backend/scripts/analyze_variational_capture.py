@@ -14,12 +14,17 @@ from __future__ import annotations
 import argparse
 import json
 import re
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
 
+MARKET_ORDER_PATH = "/api/orders/new/market"
+QUOTE_PATHS = {
+    "/api/quotes/indicative",
+    "/api/quotes/simple",
+}
 NOISY_PATHS = {
     "/api/banner",
     "/api/candles",
@@ -38,10 +43,18 @@ IMPORTANT_PATHS = {
     "/api/auth/generate_signing_data",
     "/api/auth/login",
     "/api/auth/switch",
-    "/api/orders/new/market",
+    MARKET_ORDER_PATH,
     "/api/orders/tpsl",
     "/api/positions",
 }
+SENSITIVE_KEY_RE = re.compile(
+    r"token|jwt|authorization|cookie|signed|signature|secret|session",
+    re.I,
+)
+UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.I,
+)
 NOISY_PREFIXES = (
     "/_app/",
     "/cdn-cgi/",
@@ -95,6 +108,9 @@ def analyze_capture(path: Path, *, sample_limit: int, body_chars: int) -> dict:
     non_noisy_post_samples: list[dict] = []
     important_request_samples: list[dict] = []
     important_response_samples: list[dict] = []
+    market_order_flows: list[dict] = []
+    recent_quotes: deque[dict] = deque(maxlen=25)
+    quotes_by_id: dict[str, dict] = {}
     ws_sent_samples: list[dict] = []
     contexts: dict[str, RequestContext] = {}
     total_lines = 0
@@ -142,10 +158,27 @@ def analyze_capture(path: Path, *, sample_limit: int, body_chars: int) -> dict:
                     if len(important_request_samples) < sample_limit:
                         important_request_samples.append(sample)
 
+                if url_path(str(record.get("url") or "")) == MARKET_ORDER_PATH:
+                    post_data = str(record.get("post_data") or "")
+                    order_payload = parse_json(post_data) or {}
+                    quote_id = str(order_payload.get("quote_id") or "")
+                    market_order_flows.append({
+                        "request": request_sample(record, body_chars=body_chars),
+                        "quote_id": quote_id,
+                        "matched_quote": quotes_by_id.get(quote_id),
+                        "recent_quotes": list(recent_quotes)[-5:],
+                    })
+
             elif record_type == "http_response":
                 status = str(record.get("status") or "")
                 key = endpoint_key(str(record.get("url") or ""), method=status)
                 response_counts[key] += 1
+                if url_path(str(record.get("url") or "")) in QUOTE_PATHS:
+                    sample = response_sample(record, body_chars=body_chars)
+                    sample["quote_ids"] = extract_quote_ids(str(record.get("body") or ""))
+                    recent_quotes.append(sample)
+                    for quote_id in sample["quote_ids"]:
+                        quotes_by_id[quote_id] = sample
                 if is_important_url(str(record.get("url") or "")):
                     sample = response_sample(record, body_chars=body_chars)
                     if len(important_response_samples) < sample_limit:
@@ -173,6 +206,7 @@ def analyze_capture(path: Path, *, sample_limit: int, body_chars: int) -> dict:
         "non_noisy_post_samples": non_noisy_post_samples,
         "important_request_samples": important_request_samples,
         "important_response_samples": important_response_samples,
+        "market_order_flows": market_order_flows,
         "ws_sent_samples": ws_sent_samples,
         "contexts": contexts,
     }
@@ -226,6 +260,29 @@ def print_summary(summary: dict, path: Path, *, sample_limit: int) -> None:
         if sample["body"]:
             print(sample["body"])
 
+    print("\n== Market Order Flows ==")
+    for flow in summary["market_order_flows"]:
+        request = flow["request"]
+        print(f"\n--- {request['ts']} {request['method']} {request['url']}")
+        print(f"quote_id: {flow['quote_id'] or '-'}")
+        if request["post_data"]:
+            print("market_request:")
+            print(indent(request["post_data"], "  "))
+        matched_quote = flow.get("matched_quote")
+        if matched_quote:
+            print(f"matched_quote_response: {matched_quote['ts']} {matched_quote['status']} {matched_quote['url']}")
+            print(f"quote_ids: {', '.join(matched_quote.get('quote_ids') or []) or '-'}")
+            if matched_quote["body"]:
+                print(indent(matched_quote["body"], "  "))
+        else:
+            print("matched_quote_response: not found by quote_id")
+            if flow.get("recent_quotes"):
+                print("recent_quote_responses:")
+                for quote in flow["recent_quotes"]:
+                    print(f"  {quote['ts']} {quote['status']} {quote['url']} quote_ids={quote.get('quote_ids') or []}")
+                    if quote["body"]:
+                        print(indent(quote["body"], "    "))
+
     print("\n== Candidate HTTP Requests ==")
     for sample in summary["non_noisy_post_samples"]:
         print(f"\n--- {sample['ts']} {sample['method']} {sample['url']}")
@@ -277,7 +334,7 @@ def request_sample(record: dict, *, body_chars: int) -> dict:
         "ts": record.get("ts", ""),
         "method": record.get("method", ""),
         "url": record.get("url", ""),
-        "post_data": str(record.get("post_data") or "")[:body_chars],
+        "post_data": sanitize_body(str(record.get("post_data") or ""), body_chars=body_chars),
     }
 
 
@@ -286,7 +343,7 @@ def response_sample(record: dict, *, body_chars: int) -> dict:
         "ts": record.get("ts", ""),
         "status": record.get("status", ""),
         "url": record.get("url", ""),
-        "body": str(record.get("body") or "")[:body_chars],
+        "body": sanitize_body(str(record.get("body") or ""), body_chars=body_chars),
     }
 
 
@@ -298,15 +355,76 @@ def endpoint_key(url: str, *, method: str = "") -> str:
 
 
 def is_noisy_url(url: str) -> bool:
-    parsed = urlparse(url)
-    path = parsed.path
+    path = url_path(url)
     if path in NOISY_PATHS:
         return True
     return any(path.startswith(prefix) for prefix in NOISY_PREFIXES)
 
 
 def is_important_url(url: str) -> bool:
-    return urlparse(url).path in IMPORTANT_PATHS
+    return url_path(url) in IMPORTANT_PATHS
+
+
+def url_path(url: str) -> str:
+    return urlparse(url).path
+
+
+def parse_json(value: str):
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return None
+
+
+def sanitize_body(value: str, *, body_chars: int) -> str:
+    parsed = parse_json(value)
+    if parsed is None:
+        return value[:body_chars]
+    redacted = redact_json(parsed)
+    return json.dumps(redacted, ensure_ascii=False, separators=(",", ":"))[:body_chars]
+
+
+def redact_json(value):
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if SENSITIVE_KEY_RE.search(str(key)):
+                result[key] = "<redacted>"
+            else:
+                result[key] = redact_json(item)
+        return result
+    if isinstance(value, list):
+        return [redact_json(item) for item in value]
+    return value
+
+
+def extract_quote_ids(value: str) -> list[str]:
+    parsed = parse_json(value)
+    if parsed is None:
+        return []
+    seen: set[str] = set()
+    ids: list[str] = []
+    for quote_id in walk_quote_ids(parsed):
+        if quote_id not in seen:
+            ids.append(quote_id)
+            seen.add(quote_id)
+    return ids
+
+
+def walk_quote_ids(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text in {"quote_id", "quoteId"} and isinstance(item, str):
+                yield item
+            elif key_text == "id" and isinstance(item, str) and UUID_RE.match(item):
+                yield item
+            yield from walk_quote_ids(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from walk_quote_ids(item)
 
 
 def endpoint_is_noisy_key(key: str) -> bool:
