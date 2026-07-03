@@ -48,6 +48,7 @@ from backend.bot.variational.browser_requests import (
     format_completions,
     request_quantity,
 )
+from backend.bot.variational.api_executor import VariationalApiExecutor
 from backend.bot.warmup import warmup
 
 logger = logging.getLogger(__name__)
@@ -56,8 +57,10 @@ EXECUTION_ALERT_ONLY = "alert_only"
 EXECUTION_PAPER = "paper"
 EXECUTION_LIVE = "live"
 EXECUTION_VARIATIONAL_BROWSER = "variational_browser"
+EXECUTION_VARIATIONAL_API = "variational_api"
 VIRTUAL_EXCHANGE_NAME = "virtual"
 VARIATIONAL_BROWSER_EXCHANGE_NAME = "variational_browser"
+VARIATIONAL_API_EXCHANGE_NAME = "variational_api"
 
 
 @dataclass
@@ -124,11 +127,15 @@ class BotEngine:
             self.config.paper_trading,
         )
         self.telegram = TelegramNotifier.from_env()
-        self.variational_bridge: Optional[VariationalBrowserRequestBridge] = (
-            VariationalBrowserRequestBridge()
-            if self.execution_mode == EXECUTION_VARIATIONAL_BROWSER
-            else None
-        )
+        # Variational execution backend. The API executor is a drop-in for the
+        # browser bridge (same create/close/wait surface) but places orders via
+        # the direct JSON API instead of clicking Chrome — both legs fire
+        # concurrently with no approval step.
+        self.variational_bridge = None
+        if self.execution_mode == EXECUTION_VARIATIONAL_BROWSER:
+            self.variational_bridge = VariationalBrowserRequestBridge()
+        elif self.execution_mode == EXECUTION_VARIATIONAL_API:
+            self.variational_bridge = VariationalApiExecutor()
 
         if self._uses_virtual_positions:
             # Repeated averaging/reduction alerts are not useful before live orders.
@@ -171,18 +178,26 @@ class BotEngine:
     @staticmethod
     def _normalize_execution_mode(mode: str, paper_trading: bool) -> str:
         normalized = (mode or "").lower().strip()
-        if normalized in {EXECUTION_ALERT_ONLY, EXECUTION_PAPER, EXECUTION_LIVE, EXECUTION_VARIATIONAL_BROWSER}:
+        if normalized in {
+            EXECUTION_ALERT_ONLY, EXECUTION_PAPER, EXECUTION_LIVE,
+            EXECUTION_VARIATIONAL_BROWSER, EXECUTION_VARIATIONAL_API,
+        }:
             return normalized
         return EXECUTION_PAPER if paper_trading else EXECUTION_LIVE
 
     @property
     def _uses_virtual_positions(self) -> bool:
-        return self.execution_mode in {EXECUTION_ALERT_ONLY, EXECUTION_PAPER, EXECUTION_VARIATIONAL_BROWSER}
+        return self.execution_mode in {
+            EXECUTION_ALERT_ONLY, EXECUTION_PAPER,
+            EXECUTION_VARIATIONAL_BROWSER, EXECUTION_VARIATIONAL_API,
+        }
 
     @property
     def _virtual_exchange_name(self) -> str:
         if self.execution_mode == EXECUTION_VARIATIONAL_BROWSER:
             return VARIATIONAL_BROWSER_EXCHANGE_NAME
+        if self.execution_mode == EXECUTION_VARIATIONAL_API:
+            return VARIATIONAL_API_EXCHANGE_NAME
         return VIRTUAL_EXCHANGE_NAME
 
     @property
@@ -575,6 +590,13 @@ class BotEngine:
         for exchange in self.exchanges.values():
             if hasattr(exchange, 'close'):
                 await exchange.close()
+
+        # Variational API executor (closes the persistent browser/HTTP session).
+        if self.variational_bridge is not None and hasattr(self.variational_bridge, "aclose"):
+            try:
+                await self.variational_bridge.aclose()
+            except Exception:  # noqa: BLE001
+                logger.warning("Failed to close Variational API executor", exc_info=True)
 
         logger.info("Bot engine stopped.")
 
