@@ -217,6 +217,7 @@ export default function Settings() {
             >
               <option value="alert_only">Alert Only</option>
               <option value="paper">Paper</option>
+              <option value="variational_api">Variational API</option>
               <option value="variational_browser">Variational Browser</option>
               <option value="live">Live</option>
             </select>
