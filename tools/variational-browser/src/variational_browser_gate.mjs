@@ -763,6 +763,143 @@ class VariationalBrowserGate {
     return { status: walletState.stage, screenshotPath };
   }
 
+  async apiShadowRequestFile(filePath) {
+    const raw = await fs.promises.readFile(filePath, "utf8");
+    const request = JSON.parse(raw);
+    request.id ||= path.basename(filePath, path.extname(filePath));
+    return this.apiShadowRequest(request);
+  }
+
+  async apiShadowRequest(request) {
+    const legs = this.requestLegs(request);
+    if (!legs.length) {
+      throw new Error("API shadow request has no variational legs");
+    }
+
+    console.log(`[Variational Browser] api-shadow: opening ${this.config.url}`);
+    await this.page.goto(this.config.url, { waitUntil: "domcontentloaded", timeout: this.config.navigationTimeoutMs });
+    await this.page.waitForTimeout(this.config.previewDelayMs);
+    const walletState = await this.waitForRequestWalletReady();
+    if (walletState.stage !== "ready") {
+      throw new Error(`wallet not ready for api shadow: ${walletState.stage}`);
+    }
+
+    const flows = [];
+    for (const leg of legs) {
+      const order = leg.variationalOrder || {};
+      const quoteRequest = this.buildApiQuotePayload(order);
+      console.log(`[Variational Browser] api-shadow quote: ${order.symbol} ${order.side} qty=${order.quantity}`);
+      const quoteResponse = await this.fetchVariationalApi(
+        this.config.apiShadowQuoteEndpoint,
+        quoteRequest,
+      );
+      const quoteId = quoteResponse?.quote_id;
+      if (!quoteId) {
+        throw new Error(`quote response did not include quote_id for ${order.symbol}`);
+      }
+      const marketOrderRequest = {
+        quote_id: quoteId,
+        side: String(order.side || "").toLowerCase(),
+        max_slippage: this.config.apiShadowMaxSlippage,
+        is_reduce_only: order.reduceOnly === true,
+      };
+      flows.push({
+        symbol: String(order.symbol || "").toUpperCase(),
+        action: String(order.action || request.action || request.signal?.action || "open").toLowerCase(),
+        quote_request: quoteRequest,
+        quote_response: quoteResponse,
+        market_order_request: marketOrderRequest,
+        market_order_submit_skipped: true,
+      });
+    }
+
+    const result = {
+      id: request.id,
+      created_at: new Date().toISOString(),
+      source_request: request.id,
+      mode: "api_shadow",
+      quote_endpoint: this.config.apiShadowQuoteEndpoint,
+      market_order_endpoint: "/api/orders/new/market",
+      live_market_order_submit: false,
+      flows,
+    };
+    await ensureDir(this.config.apiShadowOutputDir);
+    const outputPath = path.join(
+      this.config.apiShadowOutputDir,
+      `${new Date().toISOString().replace(/[:.]/g, "-")}-${request.id}.json`,
+    );
+    await fs.promises.writeFile(outputPath, JSON.stringify(result, null, 2), { mode: 0o600 });
+
+    const summary = [
+      "[Variational Browser] API SHADOW",
+      `id: ${request.id}`,
+      `output: ${outputPath}`,
+      `quote_endpoint: ${this.config.apiShadowQuoteEndpoint}`,
+      "market_order_submit: skipped",
+      "legs:",
+      ...flows.map((flow) => (
+        `- ${flow.symbol} ${flow.market_order_request.side} qty=${flow.quote_request.qty} quote_id=${flow.market_order_request.quote_id} reduce_only=${flow.market_order_request.is_reduce_only}`
+      )),
+    ].join("\n");
+    console.log(summary);
+    await this.telegram.trySendMessage(summary, undefined, "api shadow summary");
+    return { status: "shadowed", outputPath, flows };
+  }
+
+  requestLegs(request) {
+    const batch = request.variationalBatch;
+    if (Array.isArray(batch)) {
+      return batch.filter((item) => item && typeof item === "object");
+    }
+    return [request];
+  }
+
+  buildApiQuotePayload(order) {
+    const symbol = String(order.symbol || "").toUpperCase();
+    const quantity = String(order.quantity || "").trim();
+    if (!["BTC", "ETH"].includes(symbol)) {
+      throw new Error(`Unsupported Variational API shadow symbol: ${symbol || "(empty)"}`);
+    }
+    if (!quantity || Number(quantity) <= 0) {
+      throw new Error(`Invalid Variational API shadow quantity for ${symbol}: ${quantity || "(empty)"}`);
+    }
+    return {
+      instrument: {
+        instrument_type: "perpetual_future",
+        underlying: symbol,
+        funding_interval_s: 3600,
+        settlement_asset: "USDC",
+      },
+      qty: quantity,
+    };
+  }
+
+  async fetchVariationalApi(endpoint, payload) {
+    const url = resolveVariationalApiEndpoint(this.config.variationalBaseUrl, endpoint);
+    return this.page.evaluate(async ({ endpoint, payload }) => {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(payload),
+      });
+      const text = await response.text();
+      let body;
+      try {
+        body = text ? JSON.parse(text) : null;
+      } catch {
+        body = text;
+      }
+      if (!response.ok) {
+        throw new Error(`${endpoint} failed: ${response.status} ${typeof body === "string" ? body : JSON.stringify(body)}`);
+      }
+      return body;
+    }, {
+      endpoint: url,
+      payload,
+    });
+  }
+
   async processRequestFile(filePath) {
     const processingPath = `${filePath}.processing`;
     await fs.promises.rename(filePath, processingPath);
@@ -2911,6 +3048,7 @@ function loadConfig() {
     requestDir: path.resolve(ROOT, env("VARIATIONAL_BROWSER_REQUEST_DIR", path.join("tools", "variational-browser", "runtime", "requests"))),
     screenshotDir: path.resolve(ROOT, env("VARIATIONAL_BROWSER_SCREENSHOT_DIR", path.join("tools", "variational-browser", "runtime", "screenshots"))),
     networkCaptureDir: path.resolve(ROOT, env("VARIATIONAL_BROWSER_NETWORK_CAPTURE_DIR", path.join("tools", "variational-browser", "runtime", "network-captures"))),
+    apiShadowOutputDir: path.resolve(ROOT, env("VARIATIONAL_API_SHADOW_OUTPUT_DIR", path.join("tools", "variational-browser", "runtime", "api-shadow"))),
     killSwitchPath: path.resolve(ROOT, env("VARIATIONAL_BROWSER_KILL_SWITCH_PATH", path.join("tools", "variational-browser", "runtime", "kill_switch.json"))),
     confirmSelector: env("VARIATIONAL_BROWSER_CONFIRM_SELECTOR", "auto"),
     headless: envBool("VARIATIONAL_BROWSER_HEADLESS", true),
@@ -2923,6 +3061,8 @@ function loadConfig() {
     networkCaptureIncludeHeaders: envBool("VARIATIONAL_BROWSER_NETWORK_CAPTURE_INCLUDE_HEADERS", false),
     networkCaptureIncludeResponseBodies: envBool("VARIATIONAL_BROWSER_NETWORK_CAPTURE_INCLUDE_RESPONSE_BODIES", false),
     networkCaptureMaxBodyBytes: Number(env("VARIATIONAL_BROWSER_NETWORK_CAPTURE_MAX_BODY_BYTES", "20000")),
+    apiShadowQuoteEndpoint: env("VARIATIONAL_API_SHADOW_QUOTE_ENDPOINT", "/api/quotes/indicative"),
+    apiShadowMaxSlippage: Number(env("VARIATIONAL_API_SHADOW_MAX_SLIPPAGE", "0.005")),
     autoClickReduceOnly: envBool("VARIATIONAL_BROWSER_AUTO_CLICK_REDUCE_ONLY", true),
     autoClickOpen: envBool("VARIATIONAL_BROWSER_AUTO_CLICK_OPEN", false),
     autoClickOpenMaxSizeUsd: Number(env("VARIATIONAL_BROWSER_AUTO_CLICK_OPEN_MAX_SIZE_USD", "100")),
@@ -3111,6 +3251,14 @@ function normalizeBaseUrl(value) {
   }
 }
 
+function resolveVariationalApiEndpoint(baseUrl, endpoint) {
+  try {
+    return new URL(endpoint).toString();
+  } catch {
+    return `${normalizeBaseUrl(baseUrl)}${String(endpoint || "").startsWith("/") ? "" : "/"}${endpoint}`;
+  }
+}
+
 function parseViewport(value) {
   const [width, height] = String(value).toLowerCase().split("x").map((part) => Number(part.trim()));
   return {
@@ -3141,6 +3289,7 @@ function parseArgs() {
     flattenPositions: args.includes("--flatten-positions"),
     status: args.includes("--status"),
     request: get("--request"),
+    apiShadow: get("--api-shadow"),
     selector: get("--selector"),
     url: get("--url"),
   };
@@ -3253,6 +3402,8 @@ async function run() {
       });
     } else if (args.status) {
       await gate.statusCurrentPage();
+    } else if (args.apiShadow) {
+      await gate.apiShadowRequestFile(resolveRequestPath(args.apiShadow));
     } else if (args.request) {
       await gate.processRequestFile(resolveRequestPath(args.request));
     } else if (args.approveClick) {
@@ -3267,6 +3418,7 @@ async function run() {
       console.log("  npm start -- --reset-wallet-session");
       console.log("  npm start -- --flatten-positions");
       console.log("  npm start -- --status");
+      console.log("  npm start -- --api-shadow runtime/requests/order.json");
       console.log("  npm start -- --approve-click --selector 'button:has-text(\"Submit\")'");
       console.log("  npm start -- --request runtime/requests/order.json");
       console.log("  npm start -- --daemon");

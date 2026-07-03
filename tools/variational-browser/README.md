@@ -411,6 +411,38 @@ Force Flatten, then inspect:
 ls -lt tools/variational-browser/runtime/network-captures
 ```
 
+Analyze the capture and inspect the market-order flow:
+
+```bash
+cd ~/monk_trading_bot
+latest=$(ls -t tools/variational-browser/runtime/network-captures/*.ndjson | head -1)
+venv/bin/python -m backend.scripts.analyze_variational_capture "$latest" \
+  --sample-limit 30 \
+  --body-chars 5000 > /tmp/variational-summary.txt
+grep -A180 "== Market Order Flows ==" /tmp/variational-summary.txt
+```
+
+The captured live market path is:
+
+1. `POST /api/quotes/indicative` with an instrument and `qty`.
+2. Take the returned `quote_id`.
+3. `POST /api/orders/new/market` with `{quote_id, side, max_slippage, is_reduce_only}`.
+
+To replay a generated request through the authenticated browser session without
+submitting a live market order, use API shadow mode:
+
+```bash
+cd ~/monk_trading_bot/tools/variational-browser
+npm start -- --api-shadow runtime/requests/variational-example.json
+```
+
+`--api-shadow` reads the request file without renaming or archiving it, calls
+only the quote endpoint using the existing Variational browser cookies, then
+writes the reconstructed market-order payload to
+`tools/variational-browser/runtime/api-shadow/*.json`. It intentionally does not
+call `/api/orders/new/market`; this is the compare/dry-run bridge before any
+direct live API executor.
+
 Create a reduce-only close request by inverting the original pair direction:
 
 ```bash
