@@ -232,6 +232,25 @@ def test_healthcheck_alerts_when_reconnect_fails():
     assert any("session DOWN" in t for t, _ in notifier.errors)
 
 
+def test_healthcheck_prewarms_before_first_interval():
+    """The session must be built at start, not lazily on the first order."""
+    conn = FakeConnector()
+    ex = VariationalApiExecutor(
+        settings=SimpleNamespace(api_healthcheck_sec=3600),  # long interval
+        connector_factory=lambda: conn,
+    )
+
+    async def run():
+        ex.start_healthcheck()
+        await asyncio.sleep(0.05)   # far less than the 3600s interval
+        connected = conn.connected
+        await ex.stop_healthcheck()
+        return connected
+
+    # Connected immediately despite the long probe interval -> pre-warm happened.
+    assert asyncio.run(run()) is True
+
+
 def test_healthcheck_defers_while_order_in_flight():
     conn = FakeConnector()
 

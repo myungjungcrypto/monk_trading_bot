@@ -130,6 +130,18 @@ class VariationalApiExecutor:
                 pass
 
     async def _health_loop(self, interval: float) -> None:
+        # Pre-warm immediately: build the browser session + SIWE login now, while
+        # nothing is waiting on it. Otherwise the first order to arrive pays the
+        # cold-start cost (browser launch + login, ~5s) inline on the order path —
+        # exactly the latency this executor exists to remove.
+        try:
+            await self._run_health_check()
+            if self._session_healthy and self._connector is not None:
+                logger.info("Variational API session pre-warmed — ready for orders")
+        except asyncio.CancelledError:
+            return
+        except Exception:  # noqa: BLE001
+            logger.exception("Variational API session pre-warm failed")
         while True:
             try:
                 await asyncio.sleep(interval)
