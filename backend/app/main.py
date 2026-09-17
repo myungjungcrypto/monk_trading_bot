@@ -640,8 +640,8 @@ async def bot_manual_close(
     """Queue the real Variational reduce-only close path for an open bot position."""
     if _bot_engine is None or not _bot_engine.is_running:
         raise HTTPException(400, "Bot is not running")
-    if getattr(_bot_engine, "execution_mode", "") != "variational_browser":
-        raise HTTPException(400, "Manual close is only available in variational_browser mode")
+    if getattr(_bot_engine, "execution_mode", "") not in ("variational_browser", "variational_api"):
+        raise HTTPException(400, "Manual close is only available in Variational (browser/api) modes")
 
     reason = (req.reason or "MANUAL_CLOSE").strip()[:50] or "MANUAL_CLOSE"
     try:
@@ -695,7 +695,7 @@ async def bot_reconcile_external_close(
     reason = (req.reason or "EXTERNAL_MANUAL_CLOSE").strip()[:50] or "EXTERNAL_MANUAL_CLOSE"
     pnl_usd = float(req.pnl_usd or 0.0)
 
-    if _bot_engine and _bot_engine.is_running and getattr(_bot_engine, "execution_mode", "") == "variational_browser":
+    if _bot_engine and _bot_engine.is_running and getattr(_bot_engine, "execution_mode", "") in ("variational_browser", "variational_api"):
         result = await _bot_engine.reconcile_external_close(
             db_trade_id=req.trade_id,
             reason=reason,
@@ -710,6 +710,7 @@ async def bot_reconcile_external_close(
 
         recorder = TradeRecorder(sf)
         open_trades = await recorder.fetch_open_trades(exchange="variational_browser")
+        open_trades += await recorder.fetch_open_trades(exchange="variational_api")
         if req.trade_id is not None:
             open_trades = [trade for trade in open_trades if trade.id == req.trade_id]
 
