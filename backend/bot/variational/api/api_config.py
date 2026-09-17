@@ -83,6 +83,12 @@ class VariationalSettings(BaseSettings):
         description="Optional cf_clearance cookie for the browser-bootstrap fallback "
         "(tools/cf_bootstrap.py). Only valid from the IP that solved the challenge.",
     )
+    api_recycle_hours: float = Field(
+        default=6.0,
+        description="Rebuild the browser session after this many hours. A Chromium "
+        "page held open for days grows its JS heap until it starves the box; "
+        "recycling on a schedule bounds it. Only runs while idle. 0 disables.",
+    )
     api_healthcheck_sec: float = Field(
         default=120.0,
         description="Session keepalive interval (seconds) for the API executor. A "

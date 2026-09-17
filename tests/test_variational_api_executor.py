@@ -251,6 +251,75 @@ def test_healthcheck_prewarms_before_first_interval():
     assert asyncio.run(run()) is True
 
 
+def test_session_recycles_when_stale():
+    """A long-lived browser session is rebuilt so its heap stays bounded."""
+    first, second = FakeConnector(), FakeConnector()
+    conns = [first, second]
+    ex = VariationalApiExecutor(
+        settings=SimpleNamespace(api_healthcheck_sec=60, api_recycle_hours=6),
+        connector_factory=lambda: conns.pop(0),
+    )
+
+    async def run():
+        await ex._ensure_connected()
+        ex._connected_at -= 7 * 3600      # pretend the session is 7h old
+        await ex._run_health_check()      # healthy probe -> should still recycle
+
+    asyncio.run(run())
+    assert ex._connector is second, "stale session should have been rebuilt"
+    assert first.closed, "old browser must be torn down, not leaked"
+
+
+def test_session_not_recycled_before_deadline():
+    first = FakeConnector()
+    ex = VariationalApiExecutor(
+        settings=SimpleNamespace(api_healthcheck_sec=60, api_recycle_hours=6),
+        connector_factory=lambda: first,
+    )
+
+    async def run():
+        await ex._ensure_connected()
+        ex._connected_at -= 1 * 3600      # only 1h old
+        await ex._run_health_check()
+
+    asyncio.run(run())
+    assert ex._connector is first and not first.closed
+
+
+def test_recycle_disabled_by_zero_hours():
+    first = FakeConnector()
+    ex = VariationalApiExecutor(
+        settings=SimpleNamespace(api_healthcheck_sec=60, api_recycle_hours=0),
+        connector_factory=lambda: first,
+    )
+
+    async def run():
+        await ex._ensure_connected()
+        ex._connected_at -= 100 * 3600
+        await ex._run_health_check()
+
+    asyncio.run(run())
+    assert ex._connector is first and not first.closed
+
+
+def test_recycle_skipped_while_order_in_flight():
+    """Never rebuild the browser out from under a live entry/close."""
+    first = FakeConnector()
+    ex = VariationalApiExecutor(
+        settings=SimpleNamespace(api_healthcheck_sec=60, api_recycle_hours=6),
+        connector_factory=lambda: first,
+    )
+
+    async def run():
+        await ex._ensure_connected()
+        ex._connected_at -= 99 * 3600
+        ex._in_flight = 1
+        await ex._recycle_if_stale()
+
+    asyncio.run(run())
+    assert ex._connector is first and not first.closed
+
+
 def test_healthcheck_defers_while_order_in_flight():
     conn = FakeConnector()
 

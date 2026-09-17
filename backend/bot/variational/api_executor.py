@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -90,6 +91,9 @@ class VariationalApiExecutor:
         self._health_task: Optional[asyncio.Task] = None
         self._session_healthy = True
         self._in_flight = 0  # order batches currently executing (probe defers to them)
+        # Browser hygiene: a Chromium page left open for days grows its JS heap.
+        # Recycling the session on a schedule keeps that bounded. 0 disables.
+        self._connected_at = 0.0
 
     # -- lifecycle ----------------------------------------------------------
     async def _ensure_connected(self) -> VariationalConnector:
@@ -101,6 +105,7 @@ class VariationalApiExecutor:
                 connector = self._connector_factory()
                 await connector.connect()
                 self._connector = connector
+                self._connected_at = time.monotonic()
         return self._connector
 
     async def aclose(self) -> None:
@@ -163,24 +168,52 @@ class VariationalApiExecutor:
                 self._session_healthy = True
                 await self._notify_status(
                     "Variational API session recovered — probe succeeded again.")
+            await self._recycle_if_stale()
         except Exception as exc:  # noqa: BLE001
             await self._handle_unhealthy(exc)
+
+    async def _rebuild_connector(self) -> None:
+        """Tear down the browser session and build a fresh one (login included)."""
+        async with self._connect_lock:
+            if self._connector is not None:
+                try:
+                    await self._connector.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._connector = None
+            connector = self._connector_factory()
+            await connector.connect()
+            self._connector = connector
+            self._connected_at = time.monotonic()
+
+    async def _recycle_if_stale(self) -> None:
+        """Recycle a long-lived browser session before its heap becomes a problem.
+
+        A Chromium page held open for days keeps growing; on a shared box that
+        eventually starves everything else. Rebuilding on a schedule bounds it.
+        Runs only when idle, and a failure here is not fatal — the existing
+        session stays usable and the next probe will retry.
+        """
+        hours = float(getattr(self._settings, "api_recycle_hours", 6) or 0)
+        if hours <= 0 or self._connector is None or self._in_flight > 0:
+            return
+        age = time.monotonic() - self._connected_at
+        if age < hours * 3600:
+            return
+        logger.info(
+            "Recycling Variational API browser session after %.1fh to bound memory", age / 3600
+        )
+        try:
+            await self._rebuild_connector()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Variational API session recycle failed: %s", exc)
 
     async def _handle_unhealthy(self, exc: Exception) -> None:
         logger.warning("Variational API session probe failed: %s", exc)
         if self._in_flight > 0:
             return  # an order is running; let it own the connector
         try:
-            async with self._connect_lock:
-                if self._connector is not None:
-                    try:
-                        await self._connector.close()
-                    except Exception:  # noqa: BLE001
-                        pass
-                    self._connector = None
-                connector = self._connector_factory()
-                await connector.connect()
-                self._connector = connector
+            await self._rebuild_connector()
             self._session_healthy = True
             # One status ping per reconnect — infrequent (sessions last hours),
             # so this is useful observability, not spam.
