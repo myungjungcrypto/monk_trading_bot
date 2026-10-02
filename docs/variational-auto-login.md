@@ -129,7 +129,7 @@ VARIATIONAL_DRY_RUN=false python -m backend.scripts.variational_api_smoke --size
 
 # 포지션 확인 / 남은 테스트 포지션 정리(reduce-only)
 python -m backend.scripts.variational_api_positions
-python -m backend.scripts.variational_api_positions --flatten
+VARIATIONAL_DRY_RUN=false python -m backend.scripts.variational_api_positions --flatten
 
 # 정상 로그
 pm2 logs monk-api --lines 200 --nostream | grep -E "Variational session established|pre-warmed|keepalive|auto-reconnected|session DOWN|Recycling"
