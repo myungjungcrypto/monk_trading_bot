@@ -50,6 +50,12 @@ from backend.app.models import (
     create_async_session_factory,
     init_db,
 )
+from backend.app.bot_runtime import (
+    BOT_RUNTIME_CONFIG_KEY,
+    BotSupervisor,
+    env_flag,
+    save_bot_runtime_state,
+)
 from backend.app.ws_broadcast import broadcaster
 
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
@@ -66,6 +72,10 @@ logger = logging.getLogger(__name__)
 _bot_engine = None
 _bot_task: Optional[asyncio.Task] = None
 _broadcast_task: Optional[asyncio.Task] = None
+# True while the user wants the bot running (mirrors bot_config.bot_runtime).
+# The supervisor restarts a dead engine only while this is set.
+_bot_desired_running = False
+_backend_shutting_down = False
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -174,11 +184,12 @@ async def lifespan(app: FastAPI):
     logger.info("FastAPI backend started")
     global _broadcast_task
     _broadcast_task = asyncio.create_task(broadcaster.start_broadcast_loop())
-    await _auto_resume_open_trades(session_factory)
+    await _auto_resume_bot(session_factory)
     yield
 
-    # 종료 시 봇 정지
-    global _bot_engine, _bot_task
+    # 종료 시 봇 정지 — 저장된 desired 상태는 유지해서 다음 기동 때 자동 재개
+    global _bot_engine, _bot_task, _backend_shutting_down
+    _backend_shutting_down = True
     if _bot_engine:
         await _bot_engine.stop()
     if _bot_task:
@@ -271,41 +282,141 @@ class ForceFlattenRequest(BaseModel):
     dry_run: Optional[bool] = None
 
 
-async def _auto_resume_open_trades(session_factory) -> None:
-    """백엔드 재시작 시 열린 DB 거래가 있으면 봇을 자동 재시작합니다."""
-    enabled = os.getenv("AUTO_RESUME_OPEN_TRADES", "true").lower() not in {"0", "false", "no"}
-    if not enabled:
+def _app_session_factory():
+    state = getattr(app, "state", None)
+    return getattr(state, "session_factory", None) if state is not None else None
+
+
+def _should_bot_run() -> bool:
+    return (
+        _bot_desired_running
+        and not _backend_shutting_down
+        and env_flag("BOT_AUTO_RESTART", True)
+        and not _read_kill_switch().get("active")
+    )
+
+
+def _publish_engine(engine) -> None:
+    global _bot_engine
+    _bot_engine = engine
+    broadcaster.set_bot_engine(engine)
+
+
+async def _notify_status(text: str) -> None:
+    from backend.bot.telegram_notifier import TelegramNotifier
+
+    notifier = TelegramNotifier.from_env()
+    if notifier is None:
         return
+    try:
+        await notifier.status(text)
+    finally:
+        await notifier.close()
+
+
+def _start_request_from_state(state: Dict[str, Any]) -> BotStartRequest:
+    raw = state.get("start_request")
+    if isinstance(raw, dict):
+        try:
+            return BotStartRequest(**raw)
+        except Exception:  # noqa: BLE001
+            logger.warning("Stored bot start request is invalid; using defaults: %s", raw)
+    return BotStartRequest()
+
+
+def _create_engine(req: BotStartRequest, configs: Dict[str, Dict[str, Any]], session_factory):
+    from backend.bot.engine import BotEngine
+
+    exchanges = _build_exchanges(configs)
+    if not exchanges:
+        raise RuntimeError("No exchanges configured. Set API keys in .env")
+    config = _build_runtime_config(req, configs)
+    engine = BotEngine(exchanges=exchanges, config=config)
+    if session_factory is not None:
+        engine.set_session_factory(session_factory)
+        engine.set_config_loader(_build_runtime_config_loader(session_factory))
+    return engine
+
+
+async def _cancel_bot_task() -> None:
+    global _bot_task
+    task, _bot_task = _bot_task, None
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+
+
+def _launch_supervised(engine, req: BotStartRequest, session_factory) -> None:
+    """Start ``engine`` under a supervisor that restarts it if it dies."""
+    global _bot_task
+
+    async def factory():
+        if session_factory is not None:
+            async with session_factory() as db:
+                configs = await _load_config_map(db)
+        else:
+            configs = {}
+        return _create_engine(req, configs, session_factory)
+
+    supervisor = BotSupervisor(
+        engine_factory=factory,
+        should_run=_should_bot_run,
+        on_engine=_publish_engine,
+        notify=_notify_status,
+    )
+    _publish_engine(engine)
+    _bot_task = asyncio.create_task(supervisor.run(engine))
+
+
+async def _auto_resume_bot(session_factory) -> None:
+    """백엔드 재시작 시 봇 자동 재개.
+
+    - 마지막에 사용자가 켜둔 상태(bot_runtime.desired_running)였으면 재개
+      (AUTO_RESUME_LAST_RUNNING, 기본 true) — 포지션이 없어도 재개된다.
+    - 열린 DB 거래가 있으면 재개 (AUTO_RESUME_OPEN_TRADES, 기본 true) — 기존 동작.
+    """
+    global _bot_desired_running
 
     if _read_kill_switch().get("active"):
         logger.warning("Auto-resume skipped because Variational kill switch is active")
         return
-
-    global _bot_engine, _bot_task
     if _bot_engine and _bot_engine.is_running:
         return
 
     async with session_factory() as db:
         result = await db.execute(select(DbTrade).where(DbTrade.closed_at.is_(None)))
         open_trades = result.scalars().all()
-        if not open_trades:
-            return
         configs = await _load_config_map(db)
 
-    from backend.bot.engine import BotEngine
-
-    exchanges = _build_exchanges(configs)
-    if not exchanges:
-        logger.warning("Open DB trades exist, but no exchanges are configured; cannot auto-resume bot")
+    runtime_state = configs.get(BOT_RUNTIME_CONFIG_KEY) or {}
+    resume_last_running = (
+        env_flag("AUTO_RESUME_LAST_RUNNING", True)
+        and runtime_state.get("desired_running") is True
+    )
+    resume_open_trades = env_flag("AUTO_RESUME_OPEN_TRADES", True) and bool(open_trades)
+    if not (resume_last_running or resume_open_trades):
         return
 
-    config = _build_runtime_config(BotStartRequest(), configs)
-    _bot_engine = BotEngine(exchanges=exchanges, config=config)
-    _bot_engine.set_session_factory(session_factory)
-    _bot_engine.set_config_loader(_build_runtime_config_loader(session_factory))
-    broadcaster.set_bot_engine(_bot_engine)
-    _bot_task = asyncio.create_task(_bot_engine.start())
-    logger.info("Auto-resuming bot with %d open DB trade(s)", len(open_trades))
+    req = _start_request_from_state(runtime_state)
+    try:
+        engine = _create_engine(req, configs, session_factory)
+    except RuntimeError as exc:
+        logger.warning("Cannot auto-resume bot: %s", exc)
+        return
+
+    # Supervise only when the user had the bot running; an open-trade-only
+    # resume keeps the old one-shot behaviour.
+    _bot_desired_running = resume_last_running
+    _launch_supervised(engine, req, session_factory)
+    reason = "last run state" if resume_last_running else f"{len(open_trades)} open DB trade(s)"
+    logger.info("Auto-resuming bot after backend restart (%s)", reason)
+    try:
+        await _notify_status(f"Bot auto-resumed after backend restart ({reason}).")
+    except Exception:  # noqa: BLE001
+        logger.warning("Auto-resume telegram notice failed", exc_info=True)
 
 
 async def _load_config_map(db: AsyncSession) -> Dict[str, Dict[str, Any]]:
@@ -522,9 +633,11 @@ async def bot_status(_user: TokenData = Depends(get_current_user)):
             "running": False,
             "message": "Bot not initialized",
             "kill_switch": _read_kill_switch(),
+            "desired_running": _bot_desired_running,
         }
     status = _bot_engine.get_status()
     status["kill_switch"] = _read_kill_switch()
+    status["desired_running"] = _bot_desired_running
     return status
 
 
@@ -535,7 +648,7 @@ async def bot_start(
     _user: TokenData = Depends(get_current_user),
 ):
     """봇을 시작합니다."""
-    global _bot_engine, _bot_task
+    global _bot_desired_running
 
     if _bot_engine and _bot_engine.is_running:
         raise HTTPException(400, "Bot is already running")
@@ -544,22 +657,22 @@ async def bot_start(
     if kill_switch.get("active"):
         raise HTTPException(423, "Emergency kill switch is active. Clear it before starting the bot.")
 
-    from backend.bot.engine import BotEngine
-
     configs = await _load_config_map(db)
-    exchanges = _build_exchanges(configs)
-    if not exchanges:
-        raise HTTPException(400, "No exchanges configured. Set API keys in .env")
-    config = _build_runtime_config(req, configs)
+    sf = _app_session_factory()
+    try:
+        engine = _create_engine(req, configs, sf)
+    except RuntimeError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    config = engine.config
 
-    _bot_engine = BotEngine(exchanges=exchanges, config=config)
-    # DB 세션 팩토리 연결 → 거래 기록 자동 저장
-    sf = getattr(app, 'state', None) and getattr(app.state, 'session_factory', None)
+    # A supervisor may be sleeping in auto-restart backoff; replace it.
+    await _cancel_bot_task()
+    _bot_desired_running = True
+    _launch_supervised(engine, req, sf)
     if sf is not None:
-        _bot_engine.set_session_factory(sf)
-        _bot_engine.set_config_loader(_build_runtime_config_loader(sf))
-    broadcaster.set_bot_engine(_bot_engine)
-    _bot_task = asyncio.create_task(_bot_engine.start())
+        await save_bot_runtime_state(
+            sf, desired_running=True, start_request=req.model_dump(), reason="user_start",
+        )
 
     return {
         "status": "started",
@@ -591,16 +704,22 @@ async def bot_test_telegram(_user: TokenData = Depends(get_current_user)):
 
 @app.post("/api/bot/stop")
 async def bot_stop(_user: TokenData = Depends(get_current_user)):
-    """봇을 정지합니다."""
-    global _bot_engine, _bot_task
+    """봇을 정지합니다 (자동 재시작/재개도 해제)."""
+    global _bot_desired_running
 
-    if _bot_engine is None or not _bot_engine.is_running:
+    engine_running = bool(_bot_engine and _bot_engine.is_running)
+    restart_pending = bool(_bot_desired_running and _bot_task is not None and not _bot_task.done())
+    if not engine_running and not restart_pending:
         raise HTTPException(400, "Bot is not running")
 
-    await _bot_engine.stop()
-    if _bot_task:
-        _bot_task.cancel()
-        _bot_task = None
+    # Clear intent first so the supervisor doesn't restart what we stop.
+    _bot_desired_running = False
+    sf = _app_session_factory()
+    if sf is not None:
+        await save_bot_runtime_state(sf, desired_running=False, reason="user_stop")
+    if engine_running:
+        await _bot_engine.stop()
+    await _cancel_bot_task()
 
     return {"status": "stopped"}
 
@@ -611,7 +730,7 @@ async def bot_kill_switch(
     user: TokenData = Depends(get_current_user),
 ):
     """Emergency switch for stopping the bot and blocking browser clicks."""
-    global _bot_engine, _bot_task
+    global _bot_desired_running
 
     state = _write_kill_switch(
         active=req.active,
@@ -621,11 +740,13 @@ async def bot_kill_switch(
 
     if req.active:
         logger.warning("Emergency kill switch activated by %s: %s", user.username, state["reason"])
+        _bot_desired_running = False
+        sf = _app_session_factory()
+        if sf is not None:
+            await save_bot_runtime_state(sf, desired_running=False, reason="kill_switch")
         if _bot_engine and _bot_engine.is_running:
             await _bot_engine.stop()
-        if _bot_task:
-            _bot_task.cancel()
-            _bot_task = None
+        await _cancel_bot_task()
         return {"status": "activated", "kill_switch": state}
 
     logger.info("Emergency kill switch cleared by %s", user.username)

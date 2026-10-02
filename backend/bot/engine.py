@@ -723,23 +723,28 @@ class BotEngine:
         while self._running:
             await asyncio.sleep(60)
 
-            if not self.price_buffer.has_data:
-                logger.info("Waiting for price data... ticks=%d", self._tick_count)
-                continue
+            # A logging failure must never take the whole engine down (an
+            # exception here ends asyncio.gather in start() and stops the bot).
+            try:
+                if not self.price_buffer.has_data:
+                    logger.info("Waiting for price data... ticks=%d", self._tick_count)
+                    continue
 
-            status = self.signal_engine.get_status()
-            btc_price = self.price_buffer.btc.last_price or 0
-            eth_price = self.price_buffer.eth.last_price or 0
-            positions = len(self.position_manager.open_trades)
+                status = self.signal_engine.get_status()
+                btc_price = self.price_buffer.btc.last_price or 0
+                eth_price = self.price_buffer.eth.last_price or 0
+                positions = len(self.position_manager.open_trades)
 
-            logger.info(
-                "Status | BTC=$%.2f ETH=$%.2f | mode=%s Z=%.2f trend=%s | "
-                "ticks=%d signals=%d positions=%d | data=%d/%d",
-                btc_price, eth_price,
-                status["mode"], status["zscore_5m"], status["trend_1h"],
-                self._tick_count, self._signal_count, positions,
-                status["spread_5m_history_len"], status["window"],
-            )
+                logger.info(
+                    "Status | BTC=$%.2f ETH=$%.2f | mode=%s Z=%.2f trend=%s | "
+                    "ticks=%d signals=%d positions=%d | data=%d/%d",
+                    btc_price, eth_price,
+                    status["mode"], status["zscore_5m"], status["trend_1h"],
+                    self._tick_count, self._signal_count, positions,
+                    status["spread_5m_history_len"], status["window"],
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.error("Status log error: %s", e, exc_info=True)
 
     # ── 설정 hot reload ─────────────────────────────────────
 
