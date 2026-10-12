@@ -9,3 +9,6 @@ node_modules/
 *.db
 backend/data/
 tools/variational-browser/runtime/
+.venv/
+venv/
+.pytest_cache/

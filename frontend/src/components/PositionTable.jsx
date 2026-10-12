@@ -25,7 +25,7 @@ export default function PositionTable({ trades, onManualClose, onReconcileExtern
           <tbody>
             {trades.map((t) => {
               const isOpen = !t.closed_at;
-              const canReconcile = isOpen && t.exchange === "variational_browser";
+              const canReconcile = isOpen && (t.exchange === "variational_browser" || t.exchange === "variational_api");
               return (
                 <tr key={t.id}>
                   <td style={styles.td}>{t.id}</td>
