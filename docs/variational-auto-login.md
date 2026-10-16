@@ -134,13 +134,17 @@ AUTO_RESUME_OPEN_TRADES=true
 ## 5. 운영 / 점검
 
 ```bash
-# 실거래 전 리허설 (기본 dry-run: 로그인 + quote까지만)
+# 로그인만 확인 (읽기 전용: 로그인 + BTC/ETH 포지션 조회, 주문 없음)
+# monk-api와 같은 브라우저 프로필을 쓰므로 monk-api가 꺼져 있을 때 돌린다
+python -m backend.scripts.variational_api_positions
+
+# 실거래 전 리허설 (로그인 + quote까지만). --live가 없으면 .env와 상관없이 dry-run
+# (2026-10-16 전에는 .env가 VARIATIONAL_DRY_RUN=false면 실주문을 열고 닫지 않았다)
 python -m backend.scripts.variational_api_smoke
 # 아주 작은 실주문으로 열고 바로 반대 주문으로 닫기
 VARIATIONAL_DRY_RUN=false python -m backend.scripts.variational_api_smoke --size 5 --live
 
-# 포지션 확인 / 남은 테스트 포지션 정리(reduce-only)
-python -m backend.scripts.variational_api_positions
+# 남은 테스트 포지션 정리(reduce-only)
 VARIATIONAL_DRY_RUN=false python -m backend.scripts.variational_api_positions --flatten
 
 # 정상 로그
