@@ -19,6 +19,32 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# sendMessage rejects anything longer ("Bad Request: message is too long"), so an
+# oversized alert is lost entirely. Telegram counts UTF-16 code units.
+TELEGRAM_MAX_MESSAGE_LEN = 4096
+_TRUNCATED_SUFFIX = "\n…(truncated)"
+
+
+def _utf16_len(text: str) -> int:
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def fit_telegram_message(text: str, limit: int = TELEGRAM_MAX_MESSAGE_LEN) -> str:
+    """Cut ``text`` to Telegram's length limit, keeping the beginning.
+
+    The head carries the title and summary; what gets cut is typically an
+    exception dump that is in the logs anyway.
+    """
+    if _utf16_len(text) <= limit:
+        return text
+    budget = limit - _utf16_len(_TRUNCATED_SUFFIX)
+    used = 0
+    for i, ch in enumerate(text):
+        used += 2 if ord(ch) > 0xFFFF else 1
+        if used > budget:
+            return text[:i] + _TRUNCATED_SUFFIX
+    return text
+
 
 @dataclass
 class TelegramConfig:
@@ -82,9 +108,14 @@ class TelegramNotifier:
         if not self.enabled:
             return False
 
+        fitted = fit_telegram_message(text)
+        if fitted != text:
+            logger.info("Telegram message cut from %d to %d chars", len(text), len(fitted))
+            # A cut can split an HTML/Markdown entity; send plain text instead.
+            parse_mode = None
         payload = {
             "chat_id": self.config.chat_id,
-            "text": text,
+            "text": fitted,
             "disable_web_page_preview": True,
         }
         if parse_mode:

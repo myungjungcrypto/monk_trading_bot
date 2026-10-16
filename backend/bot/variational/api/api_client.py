@@ -119,31 +119,46 @@ class VariationalConnector(BaseExchange):
 
     # -- lifecycle ----------------------------------------------------------
     async def connect(self) -> None:
-        if self._client is None:
-            self._client = build_transport(
-                transport=self.settings.transport,
-                impersonate=self.settings.impersonate,
-                origin=self.settings.api_base.rstrip("/"),
-                user_agent=self.settings.user_agent,
-                cf_clearance=self.settings.cf_clearance,
-                headless=self.settings.browser_headless,
-                executable_path=self.settings.browser_executable,
-                user_data_dir=self.settings.browser_user_data_dir,
-            )
-            # Browser transport needs async startup (launch + Cloudflare clear).
-            if hasattr(self._client, "astart"):
-                await self._client.astart()
+        # Local checks first, so a missing key fails before a browser is launched.
         self._load_endpoint_map()
         self._address = self._derive_address()
-        # The web client stamps every request with the connected address.
-        self._client.headers["vr-connected-address"] = self._address
-        await self.authenticate()
+        try:
+            if self._client is None:
+                self._client = build_transport(
+                    transport=self.settings.transport,
+                    impersonate=self.settings.impersonate,
+                    origin=self.settings.api_base.rstrip("/"),
+                    user_agent=self.settings.user_agent,
+                    cf_clearance=self.settings.cf_clearance,
+                    headless=self.settings.browser_headless,
+                    executable_path=self.settings.browser_executable,
+                    user_data_dir=self.settings.browser_user_data_dir,
+                )
+                # Browser transport needs async startup (launch + Cloudflare clear).
+                if hasattr(self._client, "astart"):
+                    await self._client.astart()
+            # The web client stamps every request with the connected address.
+            self._client.headers["vr-connected-address"] = self._address
+            await self.authenticate()
+        except BaseException:
+            # The caller never gets a connected object, so nobody else can close
+            # this transport. A browser left running holds the persistent profile
+            # and its driver's memory — on 2026-10-16 a login 400 leaked one here
+            # and every later reconnect failed with "ProcessSingleton".
+            await self._close_quietly()
+            raise
 
     async def close(self) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        client, self._client = self._client, None
         self._session_token = None
+        if client is not None:
+            await client.aclose()
+
+    async def _close_quietly(self) -> None:
+        try:
+            await self.close()
+        except Exception:  # noqa: BLE001 - the connect error is the one to surface
+            logger.warning("Closing the Variational transport after a failed connect failed", exc_info=True)
 
     def _url(self, path: str) -> str:
         """Absolute URL for an endpoint path (transports don't share a base_url)."""
