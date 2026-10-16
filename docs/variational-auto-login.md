@@ -19,9 +19,10 @@ API 모드는 WalletConnect를 아예 쓰지 않는다. **봇이 자기 지갑 �
 봇 시작
  └ VariationalConnector.connect()
     ├ headless Chromium 띄우고 omni.variational.io 열기 (Cloudflare 통과)
-    ├ POST /api/auth/generate_signing_data  {address}       → SIWE 메시지(텍스트, 60초 만료)
+    ├ POST /api/auth/v2/generate_signing_data {address}     → {message: SIWE 메시지(60초 만료), nonce}
     ├ 그 메시지를 VARIATIONAL_PRIVATE_KEY로 personal_sign
-    ├ POST /api/auth/login {address, signed_message}         → {"token": JWT}
+    ├ POST /api/auth/login {address, signed_message, nonce}  → {"token": JWT}
+    │   (nonce가 없으면 2026-10-16부터 400 {"message":"Invalid body"})
     └ 이후 모든 요청 헤더: authorization: Bearer <JWT>, vr-connected-address: <address>
 
 평소
@@ -56,10 +57,11 @@ API 모드는 WalletConnect를 아예 쓰지 않는다. **봇이 자기 지갑 �
 
 | 함수 | 줄 | 설명 |
 |---|---|---|
-| `connect()` | ~121 | 주소 계산(키가 없으면 브라우저를 띄우기 전에 실패) → transport 생성(브라우저 transport면 `astart()`로 Chromium 기동) → `vr-connected-address` 헤더 → `authenticate()`. **어느 단계에서 실패하든(로그인 400 포함) transport를 닫고 예외를 다시 던진다** |
-| `_personal_sign()` | ~205 | `eth_account`로 EIP-191 personal_sign. 서버가 **0x 없는 130자 hex**를 기대해서 접두사를 뗀다. |
-| `authenticate()` | ~218 | signing data 요청 → 메시지에 `sign in with your Ethereum account` 있는지 검증 → 서명 → login → JWT를 `authorization: Bearer`로 설정 |
-| `_request()` | ~413 | 모든 API 호출의 공통 경로. Cloudflare 챌린지(403/503 + "Just a moment") 감지, **401이면 `authenticate()` 후 1회 재시도** |
+| `connect()` | ~127 | 주소 계산(키가 없으면 브라우저를 띄우기 전에 실패) → transport 생성(브라우저 transport면 `astart()`로 Chromium 기동) → `vr-connected-address` 헤더 → `authenticate()`. **어느 단계에서 실패하든(로그인 400 포함) transport를 닫고 예외를 다시 던진다** |
+| `_personal_sign()` | ~211 | `eth_account`로 EIP-191 personal_sign. 서버가 **0x 없는 130자 hex**를 기대해서 접두사를 뗀다. |
+| `authenticate()` | ~224 | v2 signing data 요청 → 메시지·nonce 꺼내기 → 서명 → login(`nonce` 포함) → JWT를 `authorization: Bearer`로 설정 |
+| `_signing_data()` | ~257 | 응답에서 `(message, nonce)`를 꺼낸다. 메시지에 `sign in with your Ethereum account`가 없으면 거부. v1처럼 텍스트만 오면 SIWE의 `Nonce:` 줄에서 nonce를 꺼낸다(v2 nonce와 같은 값) |
+| `_request()` | ~439 | 모든 API 호출의 공통 경로. Cloudflare 챌린지(403/503 + "Just a moment") 감지, **401이면 `authenticate()` 후 1회 재시도** |
 
 ### 3-2. Cloudflare 통과 — `backend/bot/variational/api/api_http.py`
 
@@ -162,7 +164,8 @@ pgrep -fa monk_variational_profile | cut -c1-120
 | 텔레그램 `session DOWN` + `Target crashed` | 내부 Chromium 탭이 죽고 재구성도 실패 | 봇이 돌고 있으면 백오프 간격(2→4→8→16→30분)으로 자동 재시도. 계속되면 `free -m`, `dmesg`로 메모리 확인 후 `pm2 restart monk-api` |
 | `ProcessSingleton` / `SingletonLock: File exists` | 다른 Chromium이 프로필 폴더를 잡고 있음. 2026-10-16에는 로그인에 실패한 연결이 브라우저를 닫지 않아서 생겼고, 2분마다 드라이버가 쌓여 서버 메모리가 바닥났다(이후 수정) | 지금 코드에서는 실패한 연결이 브라우저를 닫으므로 나오지 않아야 한다. 나오면 `pgrep -fa monk_variational_profile`로 남은 프로세스를 확인하고 정리한 뒤 재시작 |
 | `blocked by Cloudflare challenge` | Cloudflare가 JS 챌린지를 요구 | `VARIATIONAL_TRANSPORT=browser` 확인. 계속 막히면 `VARIATIONAL_BROWSER_HEADLESS=false`로 사람이 한 번 통과(프로필에 쿠키 저장) |
-| `Unexpected signing-data response` | Variational 프론트 API가 바뀜 | `backend/config/variational_endpoints.json`(HAR에서 추출)로 경로 덮어쓰기 가능 |
+| `Unexpected signing-data response` / `carries no nonce` | Variational 프론트 API가 바뀜 | `backend/config/variational_endpoints.json`(HAR에서 추출)로 경로 덮어쓰기 가능. 웹 번들(`/_app/immutable/chunks/*.js`)에서 `"/auth/login"`을 찾아 본문 형식을 비교 |
+| `POST /api/auth/login -> 400: {"message":"Invalid body"}` | 로그인 본문 형식이 서버와 안 맞음. 2026-10-16에는 `nonce` 누락이 원인이었다(웹은 9월부터 v2 + nonce, 서버가 10/16 03:48 UTC 전에 예전 형식을 막음) | 지금 코드는 nonce를 보낸다. 다시 나오면 위처럼 웹 번들의 로그인 본문과 비교 |
 | `BOT STOPPED` 후 자동 재시작 알림 | 엔진이 혼자 멈춤 → supervisor가 backoff 후 재시작 | 반복되면 `pm2 logs monk-api`에서 Traceback 확인 |
 
 ---
@@ -179,7 +182,7 @@ pgrep -fa monk_variational_profile | cut -c1-120
 
 ## 8. 다른 프로젝트로 옮길 때 체크리스트
 
-1. 지갑 키로 SIWE 로그인: `generate_signing_data` → personal_sign(0x 제거) → `login` → JWT
+1. 지갑 키로 SIWE 로그인: `v2/generate_signing_data`(message, nonce) → personal_sign(0x 제거) → `login`(nonce 포함) → JWT
 2. 모든 요청에 `authorization: Bearer <JWT>` + `vr-connected-address` 헤더
 3. 401이면 재로그인 후 1회 재시도 (무한 루프 방지)
 4. Cloudflare: 영구 프로필 Chromium + 페이지 내 `fetch()` (webdriver 숨김, Headless UA 제거)

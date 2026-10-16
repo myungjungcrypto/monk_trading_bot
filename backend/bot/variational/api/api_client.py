@@ -13,12 +13,16 @@ The actual API (verified against a browser HAR capture, 2026-07-03)
 -------------------------------------------------------------------
 Base URL: https://omni.variational.io (the app host; all paths under /api).
 
-Auth — wallet signature, session token afterwards:
-  1. POST /api/auth/generate_signing_data  {"address": "0x..."}
-     -> text/plain SIWE message (server builds it, incl. nonce + 60s expiry).
+Auth — wallet signature, session token afterwards (login flow re-checked 2026-10-16):
+  1. POST /api/auth/v2/generate_signing_data  {"address": "0x..."}
+     -> {"message": "<SIWE text, incl. nonce + 60s expiry>", "nonce": "..."}
+     (v1 /api/auth/generate_signing_data returned the bare text.)
   2. personal_sign that exact text with the trading wallet key.
-  3. POST /api/auth/login  {"address": "0x...", "signed_message": "<hex, NO 0x>"}
+  3. POST /api/auth/login  {"address": "0x...", "signed_message": "<hex, NO 0x>",
+                            "nonce": "<from step 1>"}
      -> {"token": "<JWT>", ...}
+  The web client has sent the nonce since ~Sep 2026; since 2026-10-16 the server
+  rejects a login without it: 400 {"message":"Invalid body"}.
   The web client also sends a `vr-connected-address: <address>` header on every
   request. The HAR was cookie/authorization-sanitized by Chrome, so whether the
   JWT travels as `Authorization: Bearer` or a cookie is not directly visible; we
@@ -60,6 +64,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from decimal import ROUND_DOWN, Decimal
 from typing import Any, Optional
 
@@ -80,10 +85,11 @@ from backend.bot.variational.api.api_types import (
 logger = logging.getLogger(__name__)
 
 
-# Verified against HAR capture 2026-07-03. An endpoint map produced by
-# tools/har_extractor.py can still override these (e.g. after a frontend update).
+# Verified against HAR capture 2026-07-03; auth_signing_data moved to v2 (web
+# bundle, 2026-10-16). An endpoint map produced by tools/har_extractor.py can
+# still override these (e.g. after a frontend update).
 _DEFAULT_PATHS: dict[str, tuple[str, str]] = {
-    "auth_signing_data": ("POST", "/api/auth/generate_signing_data"),
+    "auth_signing_data": ("POST", "/api/auth/v2/generate_signing_data"),
     "auth_login": ("POST", "/api/auth/login"),
     "rfq": ("POST", "/api/quotes/indicative"),
     "order_submit": ("POST", "/api/orders/new/market"),
@@ -226,14 +232,7 @@ class VariationalConnector(BaseExchange):
         resp = await self._request(
             method, path, json={"address": self._address}, _retry_auth=False
         )
-        # The endpoint returns text/plain; tolerate a JSON wrapper too.
-        message = resp.get("message") if isinstance(resp, dict) else resp
-        if not isinstance(message, str) or "sign in with your Ethereum account" not in message:
-            raise ExchangeError(
-                "Unexpected signing-data response; frontend API may have changed.",
-                venue=self.name,
-                payload=resp,
-            )
+        message, nonce = self._signing_data(resp)
 
         signature = self._personal_sign(message)
 
@@ -241,7 +240,7 @@ class VariationalConnector(BaseExchange):
         login = await self._request(
             method,
             path,
-            json={"address": self._address, "signed_message": signature},
+            json={"address": self._address, "signed_message": signature, "nonce": nonce},
             _retry_auth=False,
         )
         token = self._extract(login, ("token", "access_token"))
@@ -254,6 +253,33 @@ class VariationalConnector(BaseExchange):
         assert self._client is not None
         self._client.headers["authorization"] = f"Bearer {token}"
         logger.info("Variational session established for %s", self._address)
+
+    def _signing_data(self, resp: Any) -> tuple[str, str]:
+        """(message, nonce) from generate_signing_data.
+
+        v2 answers {"message": ..., "nonce": ...}; v1 answered the bare SIWE text,
+        whose "Nonce:" line carries the same value. The login has to echo it.
+        """
+        if isinstance(resp, dict):
+            message, nonce = resp.get("message"), resp.get("nonce")
+        else:
+            message, nonce = resp, None
+        if not isinstance(message, str) or "sign in with your Ethereum account" not in message:
+            raise ExchangeError(
+                "Unexpected signing-data response; frontend API may have changed.",
+                venue=self.name,
+                payload=resp,
+            )
+        if not nonce:
+            found = re.search(r"^Nonce: *(\S+)", message, re.MULTILINE)
+            nonce = found.group(1) if found else None
+        if not nonce:
+            raise ExchangeError(
+                "Signing-data response carries no nonce; the login API may have changed.",
+                venue=self.name,
+                payload=resp,
+            )
+        return message, nonce
 
     # -- market data ----------------------------------------------------------
     def _instrument(self, symbol: str) -> dict[str, Any]:
