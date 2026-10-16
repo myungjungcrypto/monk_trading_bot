@@ -51,6 +51,11 @@ async def main(size_usd: Decimal, allow_live: bool, hold: bool) -> None:
     live = allow_live and not settings.dry_run
     if allow_live and settings.dry_run:
         log.warning("--live passed but VARIATIONAL_DRY_RUN=true; staying in dry-run.")
+    if not live:
+        # Without --live this is a rehearsal whatever .env says. The live box runs
+        # with VARIATIONAL_DRY_RUN=false, and the open-pair step below would then
+        # submit real orders — and, with no reverse step, leave them open.
+        settings = settings.model_copy(update={"dry_run": True})
 
     async with VariationalConnector(settings) as vx:
         log.info("[1/4] logged in as %s (transport=%s live=%s)",

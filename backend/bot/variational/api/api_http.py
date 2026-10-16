@@ -171,6 +171,19 @@ class PlaywrightTransport:
             ) from exc
 
         self._pw = await async_playwright().start()
+        try:
+            await self._open_page()
+        except BaseException:
+            # Nothing else holds the driver (a node process) or the browser it
+            # launched, so a failed start must close them here. A leftover browser
+            # keeps the persistent profile's SingletonLock: every later launch then
+            # fails with "ProcessSingleton" and leaks another driver (2026-10-16).
+            await self._close_quietly()
+            raise
+        logger.info("PlaywrightTransport ready (headless=%s)", self._headless)
+
+    async def _open_page(self) -> None:
+        """Launch the browser, open the origin and wait out Cloudflare."""
         # Anti-detection + server-friendly launch args. --no-sandbox and
         # --disable-dev-shm-usage are usually required on EC2/containers;
         # --disable-blink-features=AutomationControlled hides the automation flag.
@@ -219,7 +232,6 @@ class PlaywrightTransport:
             if "Just a moment" not in content and "cf-challenge" not in content:
                 break
             await self._page.wait_for_timeout(1000)
-        logger.info("PlaywrightTransport ready (headless=%s)", self._headless)
 
     async def request(self, method: str, url: str, *, json=None, params=None, **_: Any):
         if params:
@@ -234,13 +246,29 @@ class PlaywrightTransport:
         return _ShimResponse(result["status"], result["text"])
 
     async def aclose(self) -> None:
-        # Persistent context has no separate browser handle; close the context.
-        if self._browser is not None:
-            await self._browser.close()
-        elif self._context is not None:
-            await self._context.close()
-        if self._pw is not None:
-            await self._pw.stop()
+        """Close the browser and stop the driver. Safe to call more than once.
+
+        The driver is stopped even when closing the browser raises (e.g. it has
+        crashed): stopping the driver is what finally kills the browser processes
+        and frees the profile directory.
+        """
+        browser, context, pw = self._browser, self._context, self._pw
+        self._browser = self._context = self._page = self._pw = None
+        try:
+            # Persistent context has no separate browser handle; close the context.
+            if browser is not None:
+                await browser.close()
+            elif context is not None:
+                await context.close()
+        finally:
+            if pw is not None:
+                await pw.stop()
+
+    async def _close_quietly(self) -> None:
+        try:
+            await self.aclose()
+        except Exception:  # noqa: BLE001 - the start error is the one to surface
+            logger.warning("PlaywrightTransport cleanup after a failed start failed", exc_info=True)
 
 
 # Functional headers sent on every request regardless of transport.

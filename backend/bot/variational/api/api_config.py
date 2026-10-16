@@ -96,6 +96,18 @@ class VariationalSettings(BaseSettings):
         "Cloudflare expiry while idle, triggering auto-reconnect + a Telegram "
         "alert. 0 disables the keepalive.",
     )
+    api_reconnect_base_sec: float = Field(
+        default=120.0,
+        description="Keepalive reconnect backoff (seconds) after the first failed "
+        "reconnect; doubles with each consecutive failure up to "
+        "api_reconnect_max_sec, and a passing probe resets it. Stops a persistent "
+        "failure (e.g. a changed login API) from relaunching Chromium every tick. "
+        "0 disables the backoff.",
+    )
+    api_reconnect_max_sec: float = Field(
+        default=1800.0,
+        description="Upper bound (seconds) for the keepalive reconnect backoff.",
+    )
 
     @property
     def endpoint_map_path(self) -> Path:

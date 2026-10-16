@@ -354,3 +354,253 @@ def test_connect_is_lazy_and_reused():
         assert conn.closed
 
     asyncio.run(run())
+
+
+# -- failed connects must not leak; reconnects back off (2026-10-16 outage) ----
+
+LOGIN_400 = 'POST /api/auth/login -> 400: {"message":"Invalid body"}'
+
+
+class FakeClock:
+    def __init__(self, start=1000.0):
+        self.now = start
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+class LoginBrokenConnector(FakeConnector):
+    """connect() gets as far as the browser, then the login is rejected."""
+
+    async def connect(self):
+        self.connected = True
+        raise ExchangeError(LOGIN_400, venue="variational")
+
+
+class ProbeBrokenConnector(FakeConnector):
+    """Connects fine, but the keepalive probe always fails."""
+
+    async def get_position(self, symbol):
+        raise ExchangeError("GET /api/positions -> 500: upstream error", venue="variational")
+
+
+def _recording_factory(make, clock=None):
+    """Factory that remembers every connector it built (and when)."""
+    created, times = [], []
+
+    def factory():
+        conn = make()
+        created.append(conn)
+        if clock is not None:
+            times.append(clock.now - 1000.0)
+        return conn
+
+    return factory, created, times
+
+
+def test_failed_recycle_closes_the_new_connector():
+    """The outage path: the 6h recycle hit login 400 and its new browser leaked."""
+    first, broken = FakeConnector(), LoginBrokenConnector()
+    conns = [first, broken]
+    notifier = RecordingNotifier()
+    ex = VariationalApiExecutor(
+        settings=SimpleNamespace(api_healthcheck_sec=120, api_recycle_hours=6),
+        connector_factory=lambda: conns.pop(0),
+        notifier=notifier,
+    )
+
+    async def run():
+        await ex._ensure_connected()
+        ex._connected_at -= 7 * 3600
+        await ex._run_health_check()   # probe ok -> recycle -> login 400
+
+    asyncio.run(run())
+    assert first.closed, "old session is torn down before the rebuild"
+    assert broken.closed, "the half-connected new session must be closed, not leaked"
+    assert ex._connector is None
+    assert ex._session_healthy is False
+    [(title, detail)] = notifier.errors
+    assert "session DOWN" in title
+    assert "recycle failed" in detail and "Invalid body" in detail
+
+
+def test_failed_connects_back_off_exponentially_and_never_leak():
+    clock = FakeClock()
+    factory, created, attempt_times = _recording_factory(LoginBrokenConnector, clock)
+    notifier = RecordingNotifier()
+    ex = VariationalApiExecutor(
+        settings=SimpleNamespace(
+            api_healthcheck_sec=120, api_reconnect_base_sec=120, api_reconnect_max_sec=600,
+        ),
+        connector_factory=factory,
+        notifier=notifier,
+        clock=clock,
+    )
+
+    async def run():
+        for _ in range(20):            # 20 keepalive ticks, 120s apart (40 min)
+            await ex._run_health_check()
+            clock.advance(120)
+
+    asyncio.run(run())
+    # 120 -> 240 -> 480 -> 600 (cap) -> 600: 6 attempts instead of 20 (or 40 before).
+    assert attempt_times == [0, 120, 360, 840, 1440, 2040]
+    assert all(c.closed for c in created), "every failed connector must be closed"
+    assert ex._connector is None
+    assert ex._consecutive_failures == 6
+    assert len(notifier.errors) == 6
+    assert all("connect failed" in d and "Invalid body" in d for _, d in notifier.errors)
+
+
+def test_backoff_resets_once_the_probe_passes_again():
+    clock = FakeClock()
+    good = FakeConnector()
+    conns = [LoginBrokenConnector(), LoginBrokenConnector(), good]
+    notifier = RecordingNotifier()
+    ex = VariationalApiExecutor(
+        settings=SimpleNamespace(api_healthcheck_sec=120, api_reconnect_base_sec=120),
+        connector_factory=lambda: conns.pop(0),
+        notifier=notifier,
+        clock=clock,
+    )
+
+    async def run():
+        await ex._run_health_check()   # fail 1 -> wait 120
+        clock.advance(120)
+        await ex._run_health_check()   # fail 2 -> wait 240
+        clock.advance(120)
+        await ex._run_health_check()   # still backing off: no attempt
+        assert conns[0] is good
+        clock.advance(120)
+        await ex._run_health_check()   # connects + probe passes
+
+    asyncio.run(run())
+    assert ex._connector is good
+    assert ex._consecutive_failures == 0 and ex._retry_not_before == 0.0
+    assert ex._session_healthy is True
+    assert any("recovered" in s for s in notifier.statuses)
+
+
+def test_rebuilds_back_off_when_the_probe_keeps_failing_on_fresh_sessions():
+    clock = FakeClock()
+    factory, created, build_times = _recording_factory(ProbeBrokenConnector, clock)
+    ex = VariationalApiExecutor(
+        settings=SimpleNamespace(
+            api_healthcheck_sec=120, api_reconnect_base_sec=120, api_reconnect_max_sec=600,
+        ),
+        connector_factory=factory,
+        notifier=RecordingNotifier(),
+        clock=clock,
+    )
+
+    async def run():
+        for _ in range(8):
+            await ex._run_health_check()
+            clock.advance(120)
+
+    asyncio.run(run())
+    # t=0 connect + rebuild, then rebuilds at 120, 360, 840 — not on every tick.
+    assert build_times == [0, 0, 120, 360, 840]
+    assert all(c.closed for c in created[:-1]), "replaced sessions are closed"
+    assert ex._connector is created[-1] and not created[-1].closed
+
+
+def test_down_alert_stays_short_with_playwright_call_logs():
+    """Two multi-KB Playwright errors in one alert broke Telegram's 4096 limit."""
+    call_log = "\nCall log:\n" + "\n".join(f"  - <launching> chrome --flag-{i}" for i in range(200))
+    probe_err = RuntimeError("Page.evaluate: Target crashed" + call_log)
+    launch_err = RuntimeError(
+        "BrowserType.launch_persistent_context: Failed to create a ProcessSingleton "
+        "for your profile directory." + call_log
+    )
+    assert len(str(launch_err)) > 4096
+
+    bad = FakeConnector()
+
+    async def boom(symbol):
+        raise probe_err
+    bad.get_position = boom  # type: ignore
+
+    class LaunchFails(FakeConnector):
+        async def connect(self):
+            raise launch_err
+
+    conns = [bad, LaunchFails()]
+    notifier = RecordingNotifier()
+    ex = VariationalApiExecutor(
+        settings=SimpleNamespace(api_healthcheck_sec=120),
+        connector_factory=lambda: conns.pop(0),
+        notifier=notifier,
+    )
+
+    async def run():
+        await ex._ensure_connected()
+        await ex._run_health_check()
+
+    asyncio.run(run())
+    [(_, detail)] = notifier.errors
+    assert len(detail) < 1000
+    assert "probe error: Page.evaluate: Target crashed" in detail
+    assert "Failed to create a ProcessSingleton" in detail
+    assert "Call log" not in detail
+
+
+def test_cancel_during_connect_closes_the_connector():
+    """Stopping the bot mid-launch must not orphan the half-started browser."""
+
+    class HangingConnector(FakeConnector):
+        async def connect(self):
+            self.connected = True
+            await asyncio.Event().wait()   # e.g. a slow browser launch / page load
+
+    conn = HangingConnector()
+    ex = VariationalApiExecutor(
+        settings=SimpleNamespace(api_healthcheck_sec=3600),
+        connector_factory=lambda: conn,
+    )
+
+    async def run():
+        ex.start_healthcheck()           # pre-warm starts connecting right away
+        await asyncio.sleep(0.01)
+        assert conn.connected and not conn.closed
+        await ex.stop_healthcheck()      # cancels the connect
+
+    asyncio.run(run())
+    assert conn.closed
+    assert ex._connector is None
+
+
+def test_order_path_connect_failure_closes_the_connector():
+    broken = LoginBrokenConnector()
+    ex = _executor(broken)
+
+    async def run():
+        try:
+            await ex.create_entry_requests(direction=PairDirection.LONG_BTC_SHORT_ETH, size_usd=10)
+        except ExchangeError as exc:
+            return exc
+        return None
+
+    exc = asyncio.run(run())
+    assert exc is not None and "Invalid body" in str(exc)
+    assert broken.closed and ex._connector is None
+    assert broken.orders == [], "no order may be sent without a session"
+    # Orders are outside the keepalive backoff: no failure was counted.
+    assert ex._consecutive_failures == 0
+
+
+def test_backoff_delay_doubles_and_caps():
+    ex = VariationalApiExecutor(
+        settings=SimpleNamespace(api_reconnect_base_sec=120, api_reconnect_max_sec=1800),
+        connector_factory=FakeConnector,
+    )
+    assert [ex._retry_delay(n) for n in range(1, 7)] == [120, 240, 480, 960, 1800, 1800]
+    assert ex._retry_delay(10_000) == 1800   # no overflow after days of failures
+
+    disabled = VariationalApiExecutor(
+        settings=SimpleNamespace(api_reconnect_base_sec=0), connector_factory=FakeConnector,
+    )
+    assert disabled._retry_delay(5) == 0.0
